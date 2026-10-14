@@ -23,8 +23,9 @@ resource "subako_agent" "release" {
 
   model = {
     anthropic = {
-      name       = "claude-sonnet-5"
-      max_tokens = 8192
+      name           = "claude-sonnet-5"
+      max_tokens     = 8192
+      context_window = 1000000
     }
   }
 }

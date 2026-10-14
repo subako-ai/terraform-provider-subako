@@ -71,6 +71,7 @@ resource "subako_agent" "a" {
     anthropic = {
       name                   = "claude-sonnet-5"
       max_tokens             = 8192
+      context_window         = 1000000
       thinking_budget_tokens = 1024
     }
   }
@@ -179,9 +180,10 @@ func TestAgentPublishesAVersionOnlyWhenItsConfigChanges(t *testing.T) {
 					checkStoredModel(api, map[string]any{
 						"format": "anthropic",
 						"config": map[string]any{
-							"model":      "claude-sonnet-5",
-							"max_tokens": 8192,
-							"thinking":   map[string]any{"budget_tokens": 1024},
+							"model":          "claude-sonnet-5",
+							"max_tokens":     8192,
+							"context_window": 1000000,
+							"thinking":       map[string]any{"type": "enabled", "budget_tokens": 1024},
 						},
 					}),
 				),
@@ -226,7 +228,7 @@ func unmanagedOriginsHCL(name string) string {
 resource "subako_agent" "a" {
   name              = %q
   model_provider_id = %q
-  model             = { anthropic = { name = "claude-sonnet-5", max_tokens = 8192 } }
+  model             = { anthropic = { name = "claude-sonnet-5", max_tokens = 8192, context_window = 1000000 } }
 }
 `, name, platformProviderID)
 }
@@ -681,7 +683,7 @@ func agentGrantsHCL(grants string) string {
 resource "subako_agent" "a" {
   name              = "support"
   model_provider_id = %q
-  model             = { anthropic = { name = "claude-sonnet-5", max_tokens = 8192 } }
+  model             = { anthropic = { name = "claude-sonnet-5", max_tokens = 8192, context_window = 1000000 } }
 %s
 }
 `, platformProviderID, grants)
@@ -918,7 +920,7 @@ resource "subako_agent" "a" {
 }`, platformProviderID, body)
 }
 
-const anthropicModelHCL = `  model = { anthropic = { name = "c", max_tokens = 1 } }`
+const anthropicModelHCL = `  model = { anthropic = { name = "c", max_tokens = 1, context_window = 2 } }`
 
 func TestInvalidConfigsFailValidation(t *testing.T) {
 	api, server := newFakeAPI(t)
@@ -928,12 +930,14 @@ func TestInvalidConfigsFailValidation(t *testing.T) {
 		err    string
 	}{
 		"a model naming both formats": {agentHCL(`  model = {
-    anthropic        = { name = "c", max_tokens = 1 }
+    anthropic        = { name = "c", max_tokens = 1, context_window = 2 }
     openai_responses = { name = "gpt", max_tokens = 1, context_window = 2 }
   }`), `Invalid Attribute Combination`},
 		"a model naming neither format": {agentHCL(`  model = {}`), `Missing Attribute Configuration`},
 		"openai without a context window": {
 			agentHCL(`  model = { openai_responses = { name = "gpt", max_tokens = 1 } }`), `context_window`},
+		"anthropic without a context window": {
+			agentHCL(`  model = { anthropic = { name = "c", max_tokens = 1 } }`), `context_window`},
 		"a bad grant name": {agentHCL(anthropicModelHCL + `
   mcp_servers = [{ name = "Bad Name", url = "https://x", default_policy = "allow" }]`),
 			`lowercase alphanumeric`},

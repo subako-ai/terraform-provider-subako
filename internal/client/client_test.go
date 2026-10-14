@@ -265,11 +265,11 @@ func TestThePublishBodyTagsTheModelWithItsFormat(t *testing.T) {
 
 	// An anthropic model carries its own settings and nothing the other
 	// format spells.
-	anthropic, err := json.Marshal(AnthropicModel{Model: "claude", MaxTokens: 8, ThinkingBudgetTokens: int64p(4)})
+	anthropic, err := json.Marshal(AnthropicModel{Model: "claude", MaxTokens: 8, ContextWindow: 16, ThinkingBudgetTokens: int64p(4)})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := `{"format":"anthropic","model":"claude","max_tokens":8,"thinking":{"budget_tokens":4}}`; string(anthropic) != want {
+	if want := `{"format":"anthropic","model":"claude","max_tokens":8,"context_window":16,"thinking":{"type":"enabled","budget_tokens":4}}`; string(anthropic) != want {
 		t.Fatalf("model\n got %s\nwant %s", anthropic, want)
 	}
 }
@@ -277,7 +277,7 @@ func TestThePublishBodyTagsTheModelWithItsFormat(t *testing.T) {
 func TestAStoredConfigReadsBackAsWhatWasPublished(t *testing.T) {
 	stored := `{
 		"system_prompt": "be brief",
-		"model": {"format": "anthropic", "config": {"model": "claude-sonnet-5", "max_tokens": 8192, "thinking": {"budget_tokens": 1024}}},
+		"model": {"format": "anthropic", "config": {"model": "claude-sonnet-5", "max_tokens": 8192, "context_window": 1000000, "thinking": {"type": "enabled", "budget_tokens": 1024}}},
 		"mcp": [{"name": "gh", "url": "https://mcp", "default_policy": "require_approval", "tools": [{"name": "t", "policy": "deny"}]}],
 		"skills": [{"name": "docs", "skill_id": "sk", "version": {"type": "pinned", "number": 2}}]
 	}`
@@ -289,7 +289,7 @@ func TestAStoredConfigReadsBackAsWhatWasPublished(t *testing.T) {
 	want := AgentConfig{
 		ModelProviderID: "mp",
 		SystemPrompt:    strp("be brief"),
-		Model:           AnthropicModel{Model: "claude-sonnet-5", MaxTokens: 8192, ThinkingBudgetTokens: int64p(1024)},
+		Model:           AnthropicModel{Model: "claude-sonnet-5", MaxTokens: 8192, ContextWindow: 1000000, ThinkingBudgetTokens: int64p(1024)},
 		MCP: []MCPGrant{{Name: "gh", URL: "https://mcp", DefaultPolicy: "require_approval",
 			Tools: []ToolRule{{Name: "t", Policy: "deny"}}}},
 		Skills: []SkillGrant{{Name: "docs", SkillID: "sk", Version: int64p(2)}},
@@ -303,6 +303,24 @@ func TestAStoredConfigWithAnUnknownModelFormatIsRefused(t *testing.T) {
 	version := AgentVersion{Config: json.RawMessage(`{"model":{"format":"gemini","config":{}}}`)}
 	if _, err := version.AgentConfig(); err == nil {
 		t.Fatal("an unknown model format decoded")
+	}
+}
+
+func TestAStoredConfigWithAThinkingTypeThisProviderDoesNotManageIsRefused(t *testing.T) {
+	version := AgentVersion{Config: json.RawMessage(`{"model":{"format":"anthropic","config":{"model":"claude","max_tokens":8,"context_window":16,"thinking":{"type":"adaptive"}}}}`)}
+	if _, err := version.AgentConfig(); err == nil {
+		t.Fatal("an adaptive thinking config decoded")
+	}
+}
+
+func TestAStoredConfigPublishedBeforeThinkingWasTypedReadsBackAsEnabled(t *testing.T) {
+	version := AgentVersion{Config: json.RawMessage(`{"model":{"format":"anthropic","config":{"model":"claude","max_tokens":8,"thinking":{"budget_tokens":4}}}}`)}
+	got, err := version.AgentConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := (AnthropicModel{Model: "claude", MaxTokens: 8, ThinkingBudgetTokens: int64p(4)}); !reflect.DeepEqual(got.Model, want) {
+		t.Fatalf("\n got %+v\nwant %+v", got.Model, want)
 	}
 }
 

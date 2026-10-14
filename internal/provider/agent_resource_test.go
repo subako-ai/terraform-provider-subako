@@ -13,7 +13,7 @@ import (
 // anAgent is an agent holding one version's config, granting nothing.
 func anAgent(ctx context.Context, t *testing.T) agentModel {
 	t.Helper()
-	model, diags := modelObject(ctx, client.AnthropicModel{Model: "claude-sonnet-5", MaxTokens: 8192})
+	model, diags := modelObject(ctx, client.AnthropicModel{Model: "claude-sonnet-5", MaxTokens: 8192, ContextWindow: 1000000})
 	if diags.HasError() {
 		t.Fatalf("building the model: %v", diags)
 	}
