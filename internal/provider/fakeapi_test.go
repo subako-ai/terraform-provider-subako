@@ -17,6 +17,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/subako-ai/terraform-provider-subako/internal/client"
 )
 
 // fakeAPI is an in-memory stand-in for the subset of `/v1` the provider
@@ -298,12 +300,34 @@ func storedConfig(body map[string]any) map[string]any {
 	return config
 }
 
+// isWellFormedAnthropicModel refuses an anthropic model the live API refuses: one without context_window, or whose thinking has no AnthropicThinkingBody tag.
+func isWellFormedAnthropicModel(raw any) bool {
+	model, _ := raw.(map[string]any)
+	if model["format"] != client.FormatAnthropic {
+		return true
+	}
+	if _, ok := model["context_window"].(float64); !ok {
+		return false
+	}
+	if thinking, ok := model["thinking"].(map[string]any); ok {
+		switch thinking["type"] {
+		case "adaptive", "disabled", "between_tools", "enabled":
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 func (a *fakeAPI) publish(r *http.Request, args []string) (int, any) {
 	agent, ok := a.agents[args[0]]
 	if !ok {
 		return 404, notFound
 	}
 	body := decode(r)
+	if !isWellFormedAnthropicModel(body["model"]) {
+		return 400, errBody("invalid_request", "malformed request body")
+	}
 	version := map[string]any{
 		"id":                newID(),
 		"agent_id":          args[0],

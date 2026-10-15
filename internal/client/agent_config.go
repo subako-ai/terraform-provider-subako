@@ -39,6 +39,7 @@ type ModelConfig interface {
 type AnthropicModel struct {
 	Model                string
 	MaxTokens            int64
+	ContextWindow        int64
 	ThinkingBudgetTokens *int64
 }
 
@@ -59,14 +60,19 @@ func (OpenAIResponsesModel) sealedModelConfig() {}
 // anthropicSettings and openaiResponsesSettings are one format's settings,
 // spelled the same way in the publish body and in the stored form.
 type anthropicSettings struct {
-	Model     string             `json:"model"`
-	MaxTokens int64              `json:"max_tokens"`
-	Thinking  *anthropicThinking `json:"thinking,omitempty"`
+	Model         string             `json:"model"`
+	MaxTokens     int64              `json:"max_tokens"`
+	ContextWindow int64              `json:"context_window"`
+	Thinking      *anthropicThinking `json:"thinking,omitempty"`
 }
 
+// anthropicThinking is `AnthropicThinkingBody`.
 type anthropicThinking struct {
-	BudgetTokens int64 `json:"budget_tokens"`
+	Type         string `json:"type"`
+	BudgetTokens int64  `json:"budget_tokens"`
 }
+
+const anthropicThinkingEnabled = "enabled"
 
 type openaiResponsesSettings struct {
 	Model           string  `json:"model"`
@@ -88,9 +94,9 @@ type (
 )
 
 func (m AnthropicModel) settings() anthropicSettings {
-	settings := anthropicSettings{Model: m.Model, MaxTokens: m.MaxTokens}
+	settings := anthropicSettings{Model: m.Model, MaxTokens: m.MaxTokens, ContextWindow: m.ContextWindow}
 	if m.ThinkingBudgetTokens != nil {
-		settings.Thinking = &anthropicThinking{BudgetTokens: *m.ThinkingBudgetTokens}
+		settings.Thinking = &anthropicThinking{Type: anthropicThinkingEnabled, BudgetTokens: *m.ThinkingBudgetTokens}
 	}
 	return settings
 }
@@ -122,8 +128,12 @@ func decodeModel(format string, settings json.RawMessage) (ModelConfig, error) {
 		if err := json.Unmarshal(settings, &decoded); err != nil {
 			return nil, err
 		}
-		model := AnthropicModel{Model: decoded.Model, MaxTokens: decoded.MaxTokens}
+		model := AnthropicModel{Model: decoded.Model, MaxTokens: decoded.MaxTokens, ContextWindow: decoded.ContextWindow}
 		if decoded.Thinking != nil {
+			// A version published before thinking carried a type stores none, and meant enabled.
+			if decoded.Thinking.Type != anthropicThinkingEnabled && decoded.Thinking.Type != "" {
+				return nil, fmt.Errorf("anthropic thinking %q, which this provider does not manage", decoded.Thinking.Type)
+			}
 			model.ThinkingBudgetTokens = &decoded.Thinking.BudgetTokens
 		}
 		return model, nil

@@ -64,6 +64,7 @@ type agentModelConfig struct {
 type anthropicModelConfig struct {
 	Name                 types.String `tfsdk:"name"`
 	MaxTokens            types.Int64  `tfsdk:"max_tokens"`
+	ContextWindow        types.Int64  `tfsdk:"context_window"`
 	ThinkingBudgetTokens types.Int64  `tfsdk:"thinking_budget_tokens"`
 }
 
@@ -78,6 +79,7 @@ var (
 	anthropicModelTypes = map[string]attr.Type{
 		"name":                   types.StringType,
 		"max_tokens":             types.Int64Type,
+		"context_window":         types.Int64Type,
 		"thinking_budget_tokens": types.Int64Type,
 	}
 	openaiResponsesModelTypes = map[string]attr.Type{
@@ -134,6 +136,10 @@ var reasoningEfforts = []string{"none", "minimal", "low", "medium", "high", "xhi
 // maxTokenCount is what the server's token counts are: a u32.
 const maxTokenCount = 4294967295
 
+func tokenCountValidators() []validator.Int64 {
+	return []validator.Int64{int64validator.Between(0, maxTokenCount)}
+}
+
 func (r *agentResource) Metadata(_ context.Context, req resource.MetadataRequest, resp *resource.MetadataResponse) {
 	resp.TypeName = req.ProviderTypeName + "_agent"
 }
@@ -181,12 +187,16 @@ func (r *agentResource) Schema(_ context.Context, _ resource.SchemaRequest, resp
 							},
 							"max_tokens": schema.Int64Attribute{
 								Required:   true,
-								Validators: []validator.Int64{int64validator.Between(0, maxTokenCount)},
+								Validators: tokenCountValidators(),
+							},
+							"context_window": schema.Int64Attribute{
+								Required:   true,
+								Validators: tokenCountValidators(),
 							},
 							"thinking_budget_tokens": schema.Int64Attribute{
 								Optional:    true,
 								Description: "Enables extended thinking with this budget.",
-								Validators:  []validator.Int64{int64validator.Between(0, maxTokenCount)},
+								Validators:  tokenCountValidators(),
 							},
 						},
 					},
@@ -200,11 +210,11 @@ func (r *agentResource) Schema(_ context.Context, _ resource.SchemaRequest, resp
 							},
 							"max_tokens": schema.Int64Attribute{
 								Required:   true,
-								Validators: []validator.Int64{int64validator.Between(0, maxTokenCount)},
+								Validators: tokenCountValidators(),
 							},
 							"context_window": schema.Int64Attribute{
 								Required:   true,
-								Validators: []validator.Int64{int64validator.Between(0, maxTokenCount)},
+								Validators: tokenCountValidators(),
 							},
 							"reasoning_effort": schema.StringAttribute{
 								Optional:    true,
@@ -359,6 +369,7 @@ func (m agentModelConfig) modelConfig() (client.ModelConfig, diag.Diagnostics) {
 		return client.AnthropicModel{
 			Model:                m.Anthropic.Name.ValueString(),
 			MaxTokens:            m.Anthropic.MaxTokens.ValueInt64(),
+			ContextWindow:        m.Anthropic.ContextWindow.ValueInt64(),
 			ThinkingBudgetTokens: int64Pointer(m.Anthropic.ThinkingBudgetTokens),
 		}, diags
 	case m.OpenAIResponses != nil && m.Anthropic == nil:
@@ -388,6 +399,7 @@ func modelObject(ctx context.Context, config client.ModelConfig) (types.Object, 
 		variant, d = types.ObjectValueFrom(ctx, anthropicModelTypes, anthropicModelConfig{
 			Name:                 types.StringValue(model.Model),
 			MaxTokens:            types.Int64Value(model.MaxTokens),
+			ContextWindow:        types.Int64Value(model.ContextWindow),
 			ThinkingBudgetTokens: optionalInt64(model.ThinkingBudgetTokens),
 		})
 	case client.OpenAIResponsesModel:
