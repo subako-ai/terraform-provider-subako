@@ -100,6 +100,3 @@ func (v charLength) ValidateString(ctx context.Context, req validator.StringRequ
 			req.Path, v.Description(ctx), fmt.Sprintf("%d", count)))
 	}
 }
-
-// Policy actions, as `PolicyActionBody` spells them.
-var policyActions = []string{"allow", "require_approval", "deny"}

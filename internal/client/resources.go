@@ -86,7 +86,8 @@ func (c *Client) PutAgentSecurity(ctx context.Context, agentID string, security 
 	return &out, c.do(ctx, req, &out)
 }
 
-// AgentVersion is `AgentVersionBody`. Config is the stored form.
+// AgentVersion is `AgentVersionBody`. Config is the `AgentConfigBody` the
+// version was published with; AgentConfig decodes it.
 type AgentVersion struct {
 	ID              string          `json:"id"`
 	AgentID         string          `json:"agent_id"`
@@ -96,7 +97,11 @@ type AgentVersion struct {
 }
 
 func (c *Client) PublishAgentVersion(ctx context.Context, agentID string, config AgentConfig) (*AgentVersion, error) {
-	req, err := jsonRequest(http.MethodPost, agentPath(agentID)+"/versions", config.publishBody())
+	body, err := config.publishBody()
+	if err != nil {
+		return nil, err
+	}
+	req, err := jsonRequest(http.MethodPost, agentPath(agentID)+"/versions", body)
 	if err != nil {
 		return nil, err
 	}
@@ -118,7 +123,8 @@ type Skill struct {
 	LatestVersion int64  `json:"latest_version"`
 }
 
-// ManifestEntry is one file a stored skill version holds.
+// ManifestEntry is one file a stored skill version or function package
+// holds.
 type ManifestEntry struct {
 	Path   string `json:"path"`
 	Size   int64  `json:"size"`
@@ -180,6 +186,78 @@ func (c *Client) DeleteSkill(ctx context.Context, id string) error {
 
 func (c *Client) LatestSkillVersion(ctx context.Context, skillID string) (*SkillVersion, error) {
 	return latest[SkillVersion](ctx, c, skillPath(skillID)+"/versions")
+}
+
+// Function is `FunctionBody`: a function package.
+type Function struct {
+	ID            string `json:"id"`
+	DisplayName   string `json:"display_name"`
+	Name          string `json:"name"`
+	LatestVersion int64  `json:"latest_version"`
+}
+
+// FunctionManifest is the part of `FunctionManifestBody` a bundle's
+// `subako-package.json` states; the functions are listed by the module.
+type FunctionManifest struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
+}
+
+// FunctionAssets is `FunctionAssetsBody`: the files under a bundle's
+// `assets/`, each listed by its path under that directory.
+type FunctionAssets struct {
+	Files []ManifestEntry `json:"files"`
+}
+
+// FunctionVersion is `FunctionVersionBody`. A nil Assets is a bundle that
+// held no `assets/`.
+type FunctionVersion struct {
+	ID           string           `json:"id"`
+	FunctionID   string           `json:"function_id"`
+	Version      int64            `json:"version"`
+	Manifest     FunctionManifest `json:"manifest"`
+	ModuleSha256 string           `json:"module_sha256"`
+	Assets       *FunctionAssets  `json:"assets"`
+}
+
+func functionPath(id string) string {
+	return "/v1/functions/" + url.PathEscape(id)
+}
+
+// CreateFunction uploads a gzipped tar as a new function package's first
+// version.
+func (c *Client) CreateFunction(ctx context.Context, bundle []byte) (*FunctionVersion, error) {
+	var out FunctionVersion
+	return &out, c.do(ctx, bundleRequest("/v1/functions", bundle), &out)
+}
+
+// PushFunctionVersion uploads a gzipped tar as a package's next version.
+func (c *Client) PushFunctionVersion(ctx context.Context, functionID string, bundle []byte) (*FunctionVersion, error) {
+	var out FunctionVersion
+	return &out, c.do(ctx, bundleRequest(functionPath(functionID)+"/versions", bundle), &out)
+}
+
+func (c *Client) GetFunction(ctx context.Context, id string) (*Function, error) {
+	var out Function
+	err := c.do(ctx, request{method: http.MethodGet, path: functionPath(id)}, &out)
+	return &out, err
+}
+
+func (c *Client) RenameFunction(ctx context.Context, id, displayName string) (*Function, error) {
+	req, err := jsonRequest(http.MethodPatch, functionPath(id), map[string]string{"display_name": displayName})
+	if err != nil {
+		return nil, err
+	}
+	var out Function
+	return &out, c.do(ctx, req, &out)
+}
+
+func (c *Client) DeleteFunction(ctx context.Context, id string) error {
+	return c.do(ctx, request{method: http.MethodDelete, path: functionPath(id)}, nil)
+}
+
+func (c *Client) LatestFunctionVersion(ctx context.Context, functionID string) (*FunctionVersion, error) {
+	return latest[FunctionVersion](ctx, c, functionPath(functionID)+"/versions")
 }
 
 // Vault is `VaultBody`. Metadata is whatever JSON is stored under it: the

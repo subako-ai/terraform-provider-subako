@@ -1,8 +1,8 @@
 # Terraform Provider for Subako
 
 Manage a [Subako](https://subako.ai) workspace as code: the agents it runs, the
-skills they load, the model providers they call, and the vaults holding the
-credentials they present.
+skills and function packages they load, the model providers they call, and the
+vaults holding the credentials they present.
 
 ```hcl
 terraform {
@@ -90,16 +90,17 @@ export SUBAKO_TOKEN=sbk_ak_...
 terraform apply -auto-approve
 ```
 
-Grant it the agent, skill, model provider, vault, and credential permissions,
-plus `workspace.read`. Leave out the session permissions, and the
+Grant it the agent, skill, function, model provider, vault, and credential
+permissions, plus `workspace.read`. Leave out the session permissions, and the
 configuration cannot spend credit.
 
 ## What you can manage
 
 | Resource | Manages |
 | --- | --- |
-| `subako_agent` | An agent: its model, system prompt, MCP servers, skills, and allowed origins |
+| `subako_agent` | An agent: its model, system prompt, MCP servers, skills, sandboxes, functions, volume, built-in servers, and allowed origins |
 | `subako_skill` | A skill, published from a directory of files |
+| `subako_function` | A function package, published from a built bundle directory |
 | `subako_model_provider` | A model upstream bound to your own API key |
 | `subako_vault` | A vault an agent's sessions draw credentials from |
 | `subako_vault_credential` | One credential in a vault: a static bearer token or an OAuth grant |
@@ -108,6 +109,71 @@ configuration cannot spend credit.
 | --- | --- |
 | `subako_model_providers` | Every model provider the workspace can use, including the ones Subako publishes |
 | `subako_workspace` | The workspace the credential acts in |
+
+### Terraform owns an agent's whole config
+
+Every part of an agent's config has an attribute, and one you leave out is the
+server's default: no sandboxes, no functions, `session_display_name = "never"`.
+Publishing a version replaces the whole config, so a change made in the console
+shows up in the next plan, and the apply after it undoes it.
+
+To leave a part to the console, name it under `ignore_changes`. Terraform then
+plans against what the latest version holds for it, and a version it publishes
+carries that along:
+
+```hcl
+resource "subako_agent" "release" {
+  # ...
+
+  lifecycle {
+    ignore_changes = [sandboxes]
+  }
+}
+```
+
+A part of the config that is one of several kinds -- the model, its thinking, a
+function's source and network, a form widget -- is an object holding one
+attribute per kind, of which you set exactly one. A kind with no settings is
+set with `{}`:
+
+```hcl
+model = {
+  anthropic = {
+    name           = "claude-sonnet-5"
+    max_tokens     = 8192
+    context_window = 1000000
+    thinking       = { enabled = { budget_tokens = 4096 } } # or { adaptive = {} }
+  }
+}
+
+functions = [{
+  name           = "github"
+  source         = { workspace = { function_id = subako_function.github.id } }
+  default_policy = "allow"
+  network        = { allowlist = { hosts = ["api.github.com"] } }
+}]
+```
+
+Terraform drops an attribute a nested object does not have rather than
+refusing it, so a misspelled optional setting is ignored: check the plan for
+the values you meant.
+
+### Function packages come from a built bundle
+
+`subako_function` uploads the directory a function build writes:
+`subako-package.json` and `module.wasm` at its root, and the files the module
+reads under `assets/`. Nothing else may sit in it. Terraform pushes a new
+version when the manifest's name or description, the module, or any asset
+changes:
+
+```hcl
+resource "subako_function" "github" {
+  source_dir = "${path.module}/functions/github/dist"
+}
+```
+
+An agent granting it with no `version` follows the latest one from each new
+session on, so pushing a version needs no new agent version.
 
 ### Secrets stay out of your state
 

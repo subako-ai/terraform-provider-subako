@@ -31,6 +31,7 @@ type fakeAPI struct {
 	workspaceID string
 	agents      map[string]*fakeAgent
 	skills      map[string]*fakeSkill
+	functions   map[string]*fakeFunction
 	vaults      map[string]*fakeVault
 	providers   map[string]*fakeProvider
 	// apiKeys records the model provider key each provider holds, by
@@ -59,6 +60,12 @@ type fakeSkill struct {
 	Versions    []map[string]any
 }
 
+type fakeFunction struct {
+	ID          string
+	DisplayName string
+	Versions    []map[string]any
+}
+
 type fakeVault struct {
 	Vault       map[string]any
 	Credentials []map[string]any
@@ -75,6 +82,7 @@ func newFakeAPI(t *testing.T) (*fakeAPI, *httptest.Server) {
 		workspaceID:  newID(),
 		agents:       map[string]*fakeAgent{},
 		skills:       map[string]*fakeSkill{},
+		functions:    map[string]*fakeFunction{},
 		vaults:       map[string]*fakeVault{},
 		providers:    map[string]*fakeProvider{},
 		apiKeys:      map[string]string{},
@@ -130,6 +138,12 @@ var routes = []route{
 	on("DELETE", "/v1/skills/"+seg, (*fakeAPI).deleteSkill),
 	on("POST", "/v1/skills/"+seg+"/versions", (*fakeAPI).pushSkill),
 	on("GET", "/v1/skills/"+seg+"/versions", (*fakeAPI).listSkillVersions),
+	on("POST", "/v1/functions", (*fakeAPI).createFunction),
+	on("GET", "/v1/functions/"+seg, (*fakeAPI).getFunction),
+	on("PATCH", "/v1/functions/"+seg, (*fakeAPI).renameFunction),
+	on("DELETE", "/v1/functions/"+seg, (*fakeAPI).deleteFunction),
+	on("POST", "/v1/functions/"+seg+"/versions", (*fakeAPI).pushFunction),
+	on("GET", "/v1/functions/"+seg+"/versions", (*fakeAPI).listFunctionVersions),
 	on("POST", "/v1/vaults", (*fakeAPI).createVault),
 	on("GET", "/v1/vaults/"+seg, (*fakeAPI).getVault),
 	on("PATCH", "/v1/vaults/"+seg, (*fakeAPI).updateVault),
@@ -278,31 +292,104 @@ func (a *fakeAPI) putSecurity(r *http.Request, args []string) (int, any) {
 	return 200, map[string]any{"allowed_origins": agent.Origins}
 }
 
-// storedConfig turns a publish body into the form a version stores: the
-// model's settings under `config`, empty grant lists dropped.
-func storedConfig(body map[string]any) map[string]any {
-	model := body["model"].(map[string]any)
-	settings := map[string]any{}
-	for k, v := range model {
-		if k != "format" && v != nil {
-			settings[k] = v
+// publishedConfig reads a publish body as the server does: a field the
+// config does not name is refused, and the version answers every field, one
+// left out at the default the server reads it as.
+func publishedConfig(body map[string]any) (map[string]any, error) {
+	config := map[string]any{}
+	for k, v := range body {
+		if k != "model_provider_id" {
+			config[k] = v
 		}
 	}
-	config := map[string]any{"model": map[string]any{"format": model["format"], "config": settings}}
-	if prompt, ok := body["system_prompt"]; ok && prompt != nil {
-		config["system_prompt"] = prompt
+	if err := fill(config, ".", map[string]any{
+		"system_prompt": nil, "model": required, "mcp": []any{}, "skills": []any{},
+		"sandboxes": []any{}, "functions": []any{},
+		"volume":  map[string]any{"data": map[string]any{"type": "disabled"}},
+		"builtin": map[string]any{"session_display_name": map[string]any{"when": "never"}, "ask_user": nil},
+	}); err != nil {
+		return nil, err
 	}
-	for _, key := range []string{"mcp", "skills"} {
-		if list, ok := body[key].([]any); ok && len(list) > 0 {
-			config[key] = list
+	model, _ := config["model"].(map[string]any)
+	if !isWellFormedAnthropicModel(model) {
+		return nil, fmt.Errorf("model: not an anthropic model the server takes")
+	}
+	modelFields := map[string]any{
+		"format": required, "model": required, "max_tokens": required, "context_window": required,
+		"image_input": "supported",
+	}
+	switch model["format"] {
+	case client.FormatAnthropic:
+		modelFields["thinking"], modelFields["effort"] = nil, nil
+	case client.FormatOpenAIResponses:
+		modelFields["reasoning_effort"] = nil
+	default:
+		return nil, fmt.Errorf("model: unknown format %v", model["format"])
+	}
+	if err := fill(model, "model", modelFields); err != nil {
+		return nil, err
+	}
+	grants := map[string]map[string]any{
+		"mcp":    {"name": required, "url": required, "default_policy": required, "tools": []any{}},
+		"skills": {"name": required, "skill_id": required, "version": required},
+		"sandboxes": {"name": required, "environment": required, "network": map[string]any{"type": "unrestricted"},
+			"default_policy": required, "tools": []any{}},
+		"functions": {"name": required, "source": required, "default_policy": required, "tools": []any{},
+			"timeout_secs": nil, "network": map[string]any{"type": "none"}, "http_credentials": []any{}},
+	}
+	for key, fields := range grants {
+		list, ok := config[key].([]any)
+		if !ok {
+			return nil, fmt.Errorf("%s: not a list", key)
+		}
+		for i, grant := range list {
+			object, _ := grant.(map[string]any)
+			if err := fill(object, fmt.Sprintf("%s[%d]", key, i), fields); err != nil {
+				return nil, err
+			}
 		}
 	}
-	return config
+	if err := fill(config["volume"].(map[string]any), "volume", map[string]any{
+		"data": map[string]any{"type": "disabled"},
+	}); err != nil {
+		return nil, err
+	}
+	if err := fill(config["builtin"].(map[string]any), "builtin", map[string]any{
+		"session_display_name": map[string]any{"when": "never"}, "ask_user": nil,
+	}); err != nil {
+		return nil, err
+	}
+	return config, nil
+}
+
+// required marks a field fill refuses to leave out.
+var required = &struct{}{}
+
+// fill gives object each field it leaves out its default, and refuses a
+// field fields does not name or a required one left out.
+func fill(object map[string]any, at string, fields map[string]any) error {
+	if object == nil {
+		return fmt.Errorf("%s: not an object", at)
+	}
+	for key := range object {
+		if _, ok := fields[key]; !ok {
+			return fmt.Errorf("%s: unknown field `%s`", at, key)
+		}
+	}
+	for key, def := range fields {
+		if _, ok := object[key]; ok {
+			continue
+		}
+		if def == required {
+			return fmt.Errorf("%s: missing field `%s`", at, key)
+		}
+		object[key] = def
+	}
+	return nil
 }
 
 // isWellFormedAnthropicModel refuses an anthropic model the live API refuses: one without context_window, or whose thinking has no AnthropicThinkingBody tag.
-func isWellFormedAnthropicModel(raw any) bool {
-	model, _ := raw.(map[string]any)
+func isWellFormedAnthropicModel(model map[string]any) bool {
 	if model["format"] != client.FormatAnthropic {
 		return true
 	}
@@ -325,15 +412,16 @@ func (a *fakeAPI) publish(r *http.Request, args []string) (int, any) {
 		return 404, notFound
 	}
 	body := decode(r)
-	if !isWellFormedAnthropicModel(body["model"]) {
-		return 400, errBody("invalid_request", "malformed request body")
+	config, err := publishedConfig(body)
+	if err != nil {
+		return 400, errBody("invalid_request", "malformed request body: "+err.Error())
 	}
 	version := map[string]any{
 		"id":                newID(),
 		"agent_id":          args[0],
 		"version":           len(agent.Versions) + 1,
 		"model_provider_id": body["model_provider_id"],
-		"config":            storedConfig(body),
+		"config":            config,
 		"created_at":        "2026-01-01T00:00:00Z",
 	}
 	agent.Versions = append(agent.Versions, version)
@@ -456,9 +544,9 @@ func (a *fakeAPI) renameSkill(r *http.Request, args []string) (int, any) {
 	return 200, skill.body()
 }
 
-// grantedSkill reports whether any agent version grants skillID, which the
-// server refuses to delete under.
-func (a *fakeAPI) grantedSkill(skillID string) bool {
+// granted reports whether any agent version names id, a skill or function
+// package the server refuses to delete under.
+func (a *fakeAPI) granted(skillID string) bool {
 	for _, agent := range a.agents {
 		for _, v := range agent.Versions {
 			encoded, _ := json.Marshal(v["config"])
@@ -474,7 +562,7 @@ func (a *fakeAPI) deleteSkill(_ *http.Request, args []string) (int, any) {
 	if _, ok := a.skills[args[0]]; !ok {
 		return 404, notFound
 	}
-	if a.grantedSkill(args[0]) {
+	if a.granted(args[0]) {
 		return 409, errBody("conflict", "skill is still granted")
 	}
 	delete(a.skills, args[0])
@@ -487,6 +575,153 @@ func (a *fakeAPI) listSkillVersions(r *http.Request, args []string) (int, any) {
 		return 404, notFound
 	}
 	return 200, page(r, skill.Versions)
+}
+
+// unpackFunction reads a function bundle the way the server does: the
+// manifest's name and description, the module's digest, and each asset's
+// path under `assets/`, size, and digest.
+func unpackFunction(body []byte) (manifest map[string]any, module string, assets []any, err error) {
+	gz, err := gzip.NewReader(bytes.NewReader(body))
+	if err != nil {
+		return nil, "", nil, err
+	}
+	tr := tar.NewReader(gz)
+	var files []map[string]any
+	for {
+		h, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, "", nil, err
+		}
+		content, _ := io.ReadAll(tr)
+		sum := sha256.Sum256(content)
+		digest := hex.EncodeToString(sum[:])
+		switch {
+		case h.Name == "subako-package.json":
+			var stated struct {
+				Name        string `json:"name"`
+				Description string `json:"description"`
+			}
+			if err := json.Unmarshal(content, &stated); err != nil {
+				return nil, "", nil, err
+			}
+			manifest = map[string]any{"name": stated.Name, "description": stated.Description, "functions": []any{}}
+		case h.Name == "module.wasm":
+			module = digest
+		case strings.HasPrefix(h.Name, "assets/"):
+			files = append(files, map[string]any{"path": strings.TrimPrefix(h.Name, "assets/"), "size": len(content), "sha256": digest})
+		default:
+			return nil, "", nil, fmt.Errorf("bundle entry %s is not allowed", h.Name)
+		}
+	}
+	if manifest == nil || module == "" {
+		return nil, "", nil, fmt.Errorf("bundle is missing subako-package.json or module.wasm")
+	}
+	sort.Slice(files, func(i, j int) bool { return files[i]["path"].(string) < files[j]["path"].(string) })
+	for _, f := range files {
+		assets = append(assets, f)
+	}
+	return manifest, module, assets, nil
+}
+
+func (a *fakeAPI) pushFunctionVersion(function *fakeFunction, r *http.Request) (int, any) {
+	if r.Header.Get("Content-Type") != "application/gzip" {
+		return 400, errBody("invalid_request", "not gzip")
+	}
+	body, _ := io.ReadAll(r.Body)
+	manifest, module, files, err := unpackFunction(body)
+	if err != nil {
+		return 400, errBody("invalid_request", err.Error())
+	}
+	var assets any
+	if len(files) > 0 {
+		assets = map[string]any{"sha256": "archive", "bytes": 1, "files": files}
+	}
+	version := map[string]any{
+		"id":            newID(),
+		"function_id":   function.ID,
+		"version":       len(function.Versions) + 1,
+		"manifest":      manifest,
+		"module_sha256": module,
+		"module_bytes":  1,
+		"assets":        assets,
+		"created_at":    "2026-01-01T00:00:00Z",
+	}
+	function.Versions = append(function.Versions, version)
+	return 201, version
+}
+
+func (a *fakeAPI) createFunction(r *http.Request, _ []string) (int, any) {
+	function := &fakeFunction{ID: newID()}
+	status, body := a.pushFunctionVersion(function, r)
+	if status == 201 {
+		a.functions[function.ID] = function
+	}
+	return status, body
+}
+
+func (a *fakeAPI) pushFunction(r *http.Request, args []string) (int, any) {
+	function, ok := a.functions[args[0]]
+	if !ok {
+		return 404, notFound
+	}
+	return a.pushFunctionVersion(function, r)
+}
+
+func (f *fakeFunction) body() map[string]any {
+	latest := f.Versions[len(f.Versions)-1]
+	name := latest["manifest"].(map[string]any)["name"]
+	displayName := f.DisplayName
+	if displayName == "" {
+		displayName = name.(string)
+	}
+	return map[string]any{
+		"id":             f.ID,
+		"display_name":   displayName,
+		"name":           name,
+		"description":    latest["manifest"].(map[string]any)["description"],
+		"latest_version": latest["version"],
+		"created_at":     "2026-01-01T00:00:00Z",
+		"updated_at":     "2026-01-01T00:00:00Z",
+	}
+}
+
+func (a *fakeAPI) getFunction(_ *http.Request, args []string) (int, any) {
+	function, ok := a.functions[args[0]]
+	if !ok {
+		return 404, notFound
+	}
+	return 200, function.body()
+}
+
+func (a *fakeAPI) renameFunction(r *http.Request, args []string) (int, any) {
+	function, ok := a.functions[args[0]]
+	if !ok {
+		return 404, notFound
+	}
+	function.DisplayName, _ = decode(r)["display_name"].(string)
+	return 200, function.body()
+}
+
+func (a *fakeAPI) deleteFunction(_ *http.Request, args []string) (int, any) {
+	if _, ok := a.functions[args[0]]; !ok {
+		return 404, notFound
+	}
+	if a.granted(args[0]) {
+		return 409, errBody("conflict", "a published agent version still grants this package")
+	}
+	delete(a.functions, args[0])
+	return 204, nil
+}
+
+func (a *fakeAPI) listFunctionVersions(r *http.Request, args []string) (int, any) {
+	function, ok := a.functions[args[0]]
+	if !ok {
+		return 404, notFound
+	}
+	return 200, page(r, function.Versions)
 }
 
 func (a *fakeAPI) createVault(r *http.Request, _ []string) (int, any) {
