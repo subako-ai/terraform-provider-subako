@@ -69,10 +69,10 @@ resource "subako_agent" "a" {
 
   model = {
     anthropic = {
-      name                   = "claude-sonnet-5"
-      max_tokens             = 8192
-      context_window         = 1000000
-      thinking_budget_tokens = 1024
+      name           = "claude-sonnet-5"
+      max_tokens     = 8192
+      context_window = 1000000
+      thinking       = { enabled = { budget_tokens = 1024 } }
     }
   }
 
@@ -110,7 +110,7 @@ func checkVersionCount(api *fakeAPI, want int) resource.TestCheckFunc {
 }
 
 // checkStoredModel reads back the model the newest version carries: the
-// format naming the settings, and only that format's settings.
+// format naming the settings, and every setting that format has.
 func checkStoredModel(api *fakeAPI, want map[string]any) resource.TestCheckFunc {
 	return func(s *terraform.State) error {
 		rs := s.RootModule().Resources["subako_agent.a"]
@@ -135,9 +135,9 @@ func checkEmpty(api *fakeAPI) resource.TestCheckFunc {
 	return func(*terraform.State) error {
 		api.mu.Lock()
 		defer api.mu.Unlock()
-		if len(api.agents) > 0 || len(api.skills) > 0 || len(api.vaults) > 0 {
-			return fmt.Errorf("left behind: %d agents, %d skills, %d vaults",
-				len(api.agents), len(api.skills), len(api.vaults))
+		if len(api.agents) > 0 || len(api.skills) > 0 || len(api.functions) > 0 || len(api.vaults) > 0 {
+			return fmt.Errorf("left behind: %d agents, %d skills, %d functions, %d vaults",
+				len(api.agents), len(api.skills), len(api.functions), len(api.vaults))
 		}
 		for id, p := range api.providers {
 			if p.Body["type"] == "byok" {
@@ -178,13 +178,13 @@ func TestAgentPublishesAVersionOnlyWhenItsConfigChanges(t *testing.T) {
 					resource.TestCheckResourceAttrPair("subako_agent.a", "skills.0.skill_id", "subako_skill.s", "id"),
 					checkVersionCount(api, 1),
 					checkStoredModel(api, map[string]any{
-						"format": "anthropic",
-						"config": map[string]any{
-							"model":          "claude-sonnet-5",
-							"max_tokens":     8192,
-							"context_window": 1000000,
-							"thinking":       map[string]any{"type": "enabled", "budget_tokens": 1024},
-						},
+						"format":         "anthropic",
+						"model":          "claude-sonnet-5",
+						"max_tokens":     8192,
+						"context_window": 1000000,
+						"image_input":    "supported",
+						"thinking":       map[string]any{"type": "enabled", "budget_tokens": 1024},
+						"effort":         nil,
 					}),
 				),
 			},
@@ -689,13 +689,15 @@ resource "subako_agent" "a" {
 `, platformProviderID, grants)
 }
 
-// An empty grant list and an absent one carry the same config, and a version
-// is published only when the config differs.
+// A grant list left out defaults to an empty one, so spelling it either way
+// is the same plan, and nothing is published.
 func TestRespellingAnEmptyGrantListPublishesNoVersion(t *testing.T) {
 	api, server := newFakeAPI(t)
 	head := providerBlock(server.URL, api.workspaceID)
 	empty := `  mcp_servers = []
-  skills      = []`
+  skills      = []
+  sandboxes   = []
+  functions   = []`
 
 	resource.UnitTest(t, resource.TestCase{
 		TerraformVersionChecks:   versionChecks,
@@ -710,8 +712,7 @@ func TestRespellingAnEmptyGrantListPublishesNoVersion(t *testing.T) {
 				Config: head + agentGrantsHCL(empty),
 				ConfigPlanChecks: resource.ConfigPlanChecks{
 					PreApply: []plancheck.PlanCheck{
-						plancheck.ExpectResourceAction("subako_agent.a", plancheck.ResourceActionUpdate),
-						plancheck.ExpectKnownValue("subako_agent.a", tfjsonpath.New("version"), knownvalue.Int64Exact(1)),
+						plancheck.ExpectResourceAction("subako_agent.a", plancheck.ResourceActionNoop),
 					},
 				},
 				Check: checkVersionCount(api, 1),
@@ -938,6 +939,48 @@ func TestInvalidConfigsFailValidation(t *testing.T) {
 			agentHCL(`  model = { openai_responses = { name = "gpt", max_tokens = 1 } }`), `context_window`},
 		"anthropic without a context window": {
 			agentHCL(`  model = { anthropic = { name = "c", max_tokens = 1 } }`), `context_window`},
+		"thinking naming two kinds": {agentHCL(`  model = { anthropic = {
+    name = "c", max_tokens = 1, context_window = 2
+    thinking = { adaptive = {}, enabled = { budget_tokens = 1 } }
+  } }`), `Invalid Attribute Combination`},
+		// A misspelled kind leaves every kind unset.
+		"thinking naming a kind that does not exist": {agentHCL(`  model = { anthropic = {
+    name = "c", max_tokens = 1, context_window = 2, thinking = { enabeld = { budget_tokens = 1 } }
+  } }`), `Missing Attribute Configuration`},
+		"thinking naming no kind": {agentHCL(`  model = { anthropic = {
+    name = "c", max_tokens = 1, context_window = 2, thinking = {}
+  } }`), `Missing Attribute Configuration`},
+		"enabled thinking without its budget": {agentHCL(`  model = { anthropic = {
+    name = "c", max_tokens = 1, context_window = 2, thinking = { enabled = {} }
+  } }`), `budget_tokens`},
+		"an effort Anthropic does not spell": {agentHCL(`  model = { anthropic = {
+    name = "c", max_tokens = 1, context_window = 2, effort = "ludicrous"
+  } }`), `effort`},
+		"a function network naming two reaches": {agentHCL(anthropicModelHCL + `
+  functions = [{
+    name = "f", source = { platform = { package = "files" } }, default_policy = "allow"
+    network = { none = {}, unrestricted = {} }
+  }]`), `Invalid Attribute Combination`},
+		"a function source naming neither place": {agentHCL(anthropicModelHCL + `
+  functions = [{ name = "f", source = {}, default_policy = "allow" }]`), `Missing Attribute Configuration`},
+		"an allowlist naming no host": {agentHCL(anthropicModelHCL + `
+  functions = [{
+    name = "f", source = { platform = { package = "files" } }, default_policy = "allow"
+    network = { allowlist = { hosts = [] } }
+  }]`), `hosts`},
+		"a timeout past the server's bound": {agentHCL(anthropicModelHCL + `
+  functions = [{ name = "f", source = { platform = { package = "files" } }, default_policy = "allow", timeout_secs = 301 }]`),
+			`timeout_secs`},
+		"a sandbox network the server does not spell": {agentHCL(anthropicModelHCL + `
+  sandboxes = [{ name = "s", environment = { platform = { release = "2026" } }, network = "vpn", default_policy = "allow" }]`),
+			`network`},
+		"a widget naming no kind": {agentHCL(anthropicModelHCL + `
+  builtin = { ask_user = { widgets = [{}] } }`), `Missing Attribute Configuration`},
+		"a form with no widgets": {agentHCL(anthropicModelHCL + `
+  builtin = { ask_user = { widgets = [] } }`), `widgets`},
+		"a custom widget schema that is not JSON": {agentHCL(anthropicModelHCL + `
+  builtin = { ask_user = { widgets = [{ custom = { id = "w", description = "d", props = "{", answer = "{}" } }] } }`),
+			`props`},
 		"a bad grant name": {agentHCL(anthropicModelHCL + `
   mcp_servers = [{ name = "Bad Name", url = "https://x", default_policy = "allow" }]`),
 			`lowercase alphanumeric`},

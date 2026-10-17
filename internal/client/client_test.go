@@ -2,12 +2,10 @@ package client
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"reflect"
 	"sync"
 	"testing"
 )
@@ -222,123 +220,5 @@ func TestListingsWalkEveryPage(t *testing.T) {
 	}
 	if _, err := c.FindCredential(context.Background(), "v", "c3"); !IsNotFound(err) {
 		t.Fatalf("a missing credential: %v", err)
-	}
-}
-
-func int64p(n int64) *int64 { return &n }
-func strp(s string) *string { return &s }
-
-func TestThePublishBodyTagsTheModelWithItsFormat(t *testing.T) {
-	config := AgentConfig{
-		ModelProviderID: "mp",
-		SystemPrompt:    strp("be brief"),
-		Model: OpenAIResponsesModel{
-			Model: "gpt", MaxTokens: 10, ContextWindow: 100, ReasoningEffort: strp("low"),
-		},
-		MCP:    []MCPGrant{{Name: "gh", URL: "https://mcp", DefaultPolicy: "allow"}},
-		Skills: []SkillGrant{{Name: "s", SkillID: "sk"}, {Name: "p", SkillID: "sk2", Version: int64p(3)}},
-	}
-	encoded, err := json.Marshal(config.publishBody())
-	if err != nil {
-		t.Fatal(err)
-	}
-	var got map[string]any
-	_ = json.Unmarshal(encoded, &got)
-	want := map[string]any{
-		"model_provider_id": "mp",
-		"system_prompt":     "be brief",
-		"model": map[string]any{
-			"format": "openai_responses", "model": "gpt", "max_tokens": 10.0,
-			"context_window": 100.0, "reasoning_effort": "low",
-		},
-		"mcp": []any{map[string]any{"name": "gh", "url": "https://mcp", "default_policy": "allow"}},
-		"skills": []any{
-			map[string]any{"name": "s", "skill_id": "sk", "version": map[string]any{"type": "latest"}},
-			map[string]any{"name": "p", "skill_id": "sk2", "version": map[string]any{"type": "pinned", "number": 3.0}},
-		},
-	}
-	gotJSON, _ := json.Marshal(got)
-	wantJSON, _ := json.Marshal(want)
-	if string(gotJSON) != string(wantJSON) {
-		t.Fatalf("body\n got %s\nwant %s", gotJSON, wantJSON)
-	}
-
-	// An anthropic model carries its own settings and nothing the other
-	// format spells.
-	anthropic, err := json.Marshal(AnthropicModel{Model: "claude", MaxTokens: 8, ContextWindow: 16, ThinkingBudgetTokens: int64p(4)})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if want := `{"format":"anthropic","model":"claude","max_tokens":8,"context_window":16,"thinking":{"type":"enabled","budget_tokens":4}}`; string(anthropic) != want {
-		t.Fatalf("model\n got %s\nwant %s", anthropic, want)
-	}
-}
-
-func TestAStoredConfigReadsBackAsWhatWasPublished(t *testing.T) {
-	stored := `{
-		"system_prompt": "be brief",
-		"model": {"format": "anthropic", "config": {"model": "claude-sonnet-5", "max_tokens": 8192, "context_window": 1000000, "thinking": {"type": "enabled", "budget_tokens": 1024}}},
-		"mcp": [{"name": "gh", "url": "https://mcp", "default_policy": "require_approval", "tools": [{"name": "t", "policy": "deny"}]}],
-		"skills": [{"name": "docs", "skill_id": "sk", "version": {"type": "pinned", "number": 2}}]
-	}`
-	version := AgentVersion{Version: 4, ModelProviderID: "mp", Config: json.RawMessage(stored)}
-	got, err := version.AgentConfig()
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := AgentConfig{
-		ModelProviderID: "mp",
-		SystemPrompt:    strp("be brief"),
-		Model:           AnthropicModel{Model: "claude-sonnet-5", MaxTokens: 8192, ContextWindow: 1000000, ThinkingBudgetTokens: int64p(1024)},
-		MCP: []MCPGrant{{Name: "gh", URL: "https://mcp", DefaultPolicy: "require_approval",
-			Tools: []ToolRule{{Name: "t", Policy: "deny"}}}},
-		Skills: []SkillGrant{{Name: "docs", SkillID: "sk", Version: int64p(2)}},
-	}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("\n got %+v\nwant %+v", got, want)
-	}
-}
-
-func TestAStoredConfigWithAnUnknownModelFormatIsRefused(t *testing.T) {
-	version := AgentVersion{Config: json.RawMessage(`{"model":{"format":"gemini","config":{}}}`)}
-	if _, err := version.AgentConfig(); err == nil {
-		t.Fatal("an unknown model format decoded")
-	}
-}
-
-func TestAStoredConfigWithAThinkingTypeThisProviderDoesNotManageIsRefused(t *testing.T) {
-	version := AgentVersion{Config: json.RawMessage(`{"model":{"format":"anthropic","config":{"model":"claude","max_tokens":8,"context_window":16,"thinking":{"type":"adaptive"}}}}`)}
-	if _, err := version.AgentConfig(); err == nil {
-		t.Fatal("an adaptive thinking config decoded")
-	}
-}
-
-func TestAStoredConfigPublishedBeforeThinkingWasTypedReadsBackAsEnabled(t *testing.T) {
-	version := AgentVersion{Config: json.RawMessage(`{"model":{"format":"anthropic","config":{"model":"claude","max_tokens":8,"thinking":{"budget_tokens":4}}}}`)}
-	got, err := version.AgentConfig()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if want := (AnthropicModel{Model: "claude", MaxTokens: 8, ThinkingBudgetTokens: int64p(4)}); !reflect.DeepEqual(got.Model, want) {
-		t.Fatalf("\n got %+v\nwant %+v", got.Model, want)
-	}
-}
-
-func TestCanonicalFoldsEveryEmptyListToAnAbsentOne(t *testing.T) {
-	folded := AgentConfig{
-		Model:  AnthropicModel{Model: "claude"},
-		MCP:    []MCPGrant{{Name: "x", Tools: []ToolRule{}}},
-		Skills: []SkillGrant{},
-	}.Canonical()
-	want := AgentConfig{Model: AnthropicModel{Model: "claude"}, MCP: []MCPGrant{{Name: "x"}}}
-	if !reflect.DeepEqual(folded, want) {
-		t.Fatalf("\n got %+v\nwant %+v", folded, want)
-	}
-}
-
-func TestAConfigGrantingSandboxesIsRefused(t *testing.T) {
-	version := AgentVersion{Config: json.RawMessage(`{"model":{"format":"anthropic","config":{"model":"m","max_tokens":1}},"sandboxes":[{}]}`)}
-	if _, err := version.AgentConfig(); err == nil {
-		t.Fatal("a sandbox grant decoded")
 	}
 }

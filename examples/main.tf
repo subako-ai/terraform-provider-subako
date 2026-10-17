@@ -1,6 +1,7 @@
-# Everything this provider manages, in one workspace: an agent, the model
+# Most of what this provider manages, in one workspace: an agent, the model
 # provider it calls, the skill it loads, and the vault its sessions draw
-# credentials from.
+# credentials from. A `subako_function` needs a built bundle, so the agent
+# below grants one of the packages the platform ships instead.
 #
 #   subako workspace use <name>
 #   terraform init
@@ -68,6 +69,7 @@ resource "subako_agent" "release" {
       name           = "claude-sonnet-5"
       max_tokens     = 8192
       context_window = 1000000
+      thinking       = { adaptive = {} }
     }
   }
 
@@ -85,6 +87,19 @@ resource "subako_agent" "release" {
     name     = "release-notes"
     skill_id = subako_skill.release_notes.id
   }]
+
+  functions = [{
+    name           = "files"
+    source         = { platform = { package = "files" } }
+    default_policy = "allow"
+  }]
+
+  volume = { data = "enabled" }
+
+  builtin = {
+    session_display_name = "until_user_edits"
+    ask_user             = { widgets = [{ select = {} }, { confirm = {} }] }
+  }
 
   allowed_origins = ["https://release.example.com"]
 }

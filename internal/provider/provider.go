@@ -224,6 +224,7 @@ func (p *subakoProvider) Resources(_ context.Context) []func() resource.Resource
 	return []func() resource.Resource{
 		newAgentResource,
 		newSkillResource,
+		newFunctionResource,
 		newModelProviderResource,
 		newVaultResource,
 		newVaultCredentialResource,

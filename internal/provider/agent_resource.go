@@ -3,30 +3,19 @@ package provider
 import (
 	"context"
 
-	"github.com/hashicorp/terraform-plugin-framework-validators/int64validator"
-	"github.com/hashicorp/terraform-plugin-framework-validators/resourcevalidator"
-	"github.com/hashicorp/terraform-plugin-framework-validators/setvalidator"
-	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
-	"github.com/hashicorp/terraform-plugin-framework/attr"
 	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
-	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
-	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
-	"github.com/hashicorp/terraform-plugin-framework/resource/schema/setplanmodifier"
-	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
-	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
 	"github.com/hashicorp/terraform-plugin-framework/types"
-	"github.com/hashicorp/terraform-plugin-framework/types/basetypes"
 
 	"github.com/subako-ai/terraform-provider-subako/internal/client"
 )
 
 var (
-	_ resource.ResourceWithConfigure        = (*agentResource)(nil)
-	_ resource.ResourceWithImportState      = (*agentResource)(nil)
-	_ resource.ResourceWithModifyPlan       = (*agentResource)(nil)
-	_ resource.ResourceWithConfigValidators = (*agentResource)(nil)
+	_ resource.ResourceWithConfigure    = (*agentResource)(nil)
+	_ resource.ResourceWithImportState  = (*agentResource)(nil)
+	_ resource.ResourceWithModifyPlan   = (*agentResource)(nil)
+	_ resource.ResourceWithUpgradeState = (*agentResource)(nil)
 )
 
 func newAgentResource() resource.Resource {
@@ -49,95 +38,13 @@ type agentModel struct {
 	Model           types.Object `tfsdk:"model"`
 	MCPServers      types.List   `tfsdk:"mcp_servers"`
 	Skills          types.List   `tfsdk:"skills"`
+	Sandboxes       types.List   `tfsdk:"sandboxes"`
+	Functions       types.List   `tfsdk:"functions"`
+	Volume          types.Object `tfsdk:"volume"`
+	Builtin         types.Object `tfsdk:"builtin"`
 	AllowedOrigins  types.Set    `tfsdk:"allowed_origins"`
 	Version         types.Int64  `tfsdk:"version"`
 	VersionID       types.String `tfsdk:"version_id"`
-}
-
-// agentModelConfig is `model`: one nested attribute per wire format, of which
-// the schema's ExactlyOneOf leaves exactly one set.
-type agentModelConfig struct {
-	Anthropic       *anthropicModelConfig       `tfsdk:"anthropic"`
-	OpenAIResponses *openaiResponsesModelConfig `tfsdk:"openai_responses"`
-}
-
-type anthropicModelConfig struct {
-	Name                 types.String `tfsdk:"name"`
-	MaxTokens            types.Int64  `tfsdk:"max_tokens"`
-	ContextWindow        types.Int64  `tfsdk:"context_window"`
-	ThinkingBudgetTokens types.Int64  `tfsdk:"thinking_budget_tokens"`
-}
-
-type openaiResponsesModelConfig struct {
-	Name            types.String `tfsdk:"name"`
-	MaxTokens       types.Int64  `tfsdk:"max_tokens"`
-	ContextWindow   types.Int64  `tfsdk:"context_window"`
-	ReasoningEffort types.String `tfsdk:"reasoning_effort"`
-}
-
-var (
-	anthropicModelTypes = map[string]attr.Type{
-		"name":                   types.StringType,
-		"max_tokens":             types.Int64Type,
-		"context_window":         types.Int64Type,
-		"thinking_budget_tokens": types.Int64Type,
-	}
-	openaiResponsesModelTypes = map[string]attr.Type{
-		"name":             types.StringType,
-		"max_tokens":       types.Int64Type,
-		"context_window":   types.Int64Type,
-		"reasoning_effort": types.StringType,
-	}
-	agentModelTypes = map[string]attr.Type{
-		client.FormatAnthropic:       types.ObjectType{AttrTypes: anthropicModelTypes},
-		client.FormatOpenAIResponses: types.ObjectType{AttrTypes: openaiResponsesModelTypes},
-	}
-)
-
-type mcpServerModel struct {
-	Name          types.String `tfsdk:"name"`
-	URL           types.String `tfsdk:"url"`
-	DefaultPolicy types.String `tfsdk:"default_policy"`
-	Tools         types.List   `tfsdk:"tools"`
-}
-
-type toolRuleModel struct {
-	Name   types.String `tfsdk:"name"`
-	Policy types.String `tfsdk:"policy"`
-}
-
-var toolRuleType = types.ObjectType{AttrTypes: map[string]attr.Type{
-	"name":   types.StringType,
-	"policy": types.StringType,
-}}
-
-var mcpServerType = types.ObjectType{AttrTypes: map[string]attr.Type{
-	"name":           types.StringType,
-	"url":            types.StringType,
-	"default_policy": types.StringType,
-	"tools":          types.ListType{ElemType: toolRuleType},
-}}
-
-type skillGrantModel struct {
-	Name    types.String `tfsdk:"name"`
-	SkillID types.String `tfsdk:"skill_id"`
-	Version types.Int64  `tfsdk:"version"`
-}
-
-var skillGrantType = types.ObjectType{AttrTypes: map[string]attr.Type{
-	"name":     types.StringType,
-	"skill_id": types.StringType,
-	"version":  types.Int64Type,
-}}
-
-// Reasoning levels, as `ReasoningEffortBody` spells them.
-var reasoningEfforts = []string{"none", "minimal", "low", "medium", "high", "xhigh"}
-
-// maxTokenCount is what the server's token counts are: a u32.
-const maxTokenCount = 4294967295
-
-func tokenCountValidators() []validator.Int64 {
-	return []validator.Int64{int64validator.Between(0, maxTokenCount)}
 }
 
 func (r *agentResource) Metadata(_ context.Context, req resource.MetadataRequest, resp *resource.MetadataResponse) {
@@ -145,169 +52,7 @@ func (r *agentResource) Metadata(_ context.Context, req resource.MetadataRequest
 }
 
 func (r *agentResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *resource.SchemaResponse) {
-	policy := []validator.String{stringvalidator.OneOf(policyActions...)}
-	resp.Schema = schema.Schema{
-		Description: "An agent and the config its sessions run. Changing the config publishes a new " +
-			"agent version; renaming or changing `allowed_origins` does not.",
-		Attributes: map[string]schema.Attribute{
-			"id": schema.StringAttribute{
-				Computed:      true,
-				PlanModifiers: []planmodifier.String{stringplanmodifier.UseStateForUnknown()},
-			},
-			"workspace_id": schema.StringAttribute{
-				Computed:      true,
-				PlanModifiers: []planmodifier.String{stringplanmodifier.UseStateForUnknown()},
-			},
-			"name": schema.StringAttribute{
-				Required:    true,
-				Description: "A label. Agents in one workspace may share one.",
-				// CODESYNC(agent-name-len)
-				Validators: []validator.String{charsBetween(1, 200)},
-			},
-			"model_provider_id": schema.StringAttribute{
-				Required:    true,
-				Description: "The model provider the agent's model calls go to.",
-				Validators:  uuidValidators(),
-			},
-			"system_prompt": schema.StringAttribute{
-				Optional: true,
-			},
-			"model": schema.SingleNestedAttribute{
-				Required: true,
-				Description: "The model the agent runs, as exactly one of `anthropic` and " +
-					"`openai_responses`. The one you set must match the model provider's format.",
-				Attributes: map[string]schema.Attribute{
-					client.FormatAnthropic: schema.SingleNestedAttribute{
-						Optional:    true,
-						Description: "An Anthropic Messages model.",
-						Attributes: map[string]schema.Attribute{
-							"name": schema.StringAttribute{
-								Required:    true,
-								Description: "The model name, as Anthropic spells it.",
-							},
-							"max_tokens": schema.Int64Attribute{
-								Required:   true,
-								Validators: tokenCountValidators(),
-							},
-							"context_window": schema.Int64Attribute{
-								Required:   true,
-								Validators: tokenCountValidators(),
-							},
-							"thinking_budget_tokens": schema.Int64Attribute{
-								Optional:    true,
-								Description: "Enables extended thinking with this budget.",
-								Validators:  tokenCountValidators(),
-							},
-						},
-					},
-					client.FormatOpenAIResponses: schema.SingleNestedAttribute{
-						Optional:    true,
-						Description: "An OpenAI Responses model.",
-						Attributes: map[string]schema.Attribute{
-							"name": schema.StringAttribute{
-								Required:    true,
-								Description: "The model name, as the provider spells it.",
-							},
-							"max_tokens": schema.Int64Attribute{
-								Required:   true,
-								Validators: tokenCountValidators(),
-							},
-							"context_window": schema.Int64Attribute{
-								Required:   true,
-								Validators: tokenCountValidators(),
-							},
-							"reasoning_effort": schema.StringAttribute{
-								Optional:    true,
-								Description: "Absent leaves the model's own default.",
-								Validators:  []validator.String{stringvalidator.OneOf(reasoningEfforts...)},
-							},
-						},
-					},
-				},
-			},
-			"mcp_servers": schema.ListNestedAttribute{
-				Optional:    true,
-				Description: "MCP servers the agent may reach, each under a tool policy.",
-				NestedObject: schema.NestedAttributeObject{
-					Attributes: map[string]schema.Attribute{
-						"name": schema.StringAttribute{
-							Required:    true,
-							Description: "Unique within `mcp_servers`.",
-							Validators:  grantNameValidators(),
-						},
-						"url": schema.StringAttribute{
-							Required: true,
-						},
-						"default_policy": schema.StringAttribute{
-							Required:    true,
-							Description: "Applies to every tool `tools` does not name.",
-							Validators:  policy,
-						},
-						"tools": schema.ListNestedAttribute{
-							Optional: true,
-							NestedObject: schema.NestedAttributeObject{
-								Attributes: map[string]schema.Attribute{
-									"name":   schema.StringAttribute{Required: true},
-									"policy": schema.StringAttribute{Required: true, Validators: policy},
-								},
-							},
-						},
-					},
-				},
-			},
-			"skills": schema.ListNestedAttribute{
-				Optional:    true,
-				Description: "Skills the agent may read.",
-				NestedObject: schema.NestedAttributeObject{
-					Attributes: map[string]schema.Attribute{
-						"name": schema.StringAttribute{
-							Required:    true,
-							Description: "Unique within `skills`.",
-							Validators:  grantNameValidators(),
-						},
-						"skill_id": schema.StringAttribute{
-							Required:   true,
-							Validators: uuidValidators(),
-						},
-						"version": schema.Int64Attribute{
-							Optional: true,
-							Description: "Pins one skill version. Absent follows the latest version, " +
-								"resolved when each session is created.",
-							Validators: []validator.Int64{int64validator.AtLeast(1)},
-						},
-					},
-				},
-			},
-			"allowed_origins": schema.SetAttribute{
-				Optional:    true,
-				Computed:    true,
-				ElementType: types.StringType,
-				Description: "Browser origins the agent's sessions answer. `*` allows every origin. " +
-					"Left unset, Terraform does not manage the list.",
-				// CODESYNC(agent-origin-count)
-				Validators:    []validator.Set{setvalidator.SizeAtMost(32)},
-				PlanModifiers: []planmodifier.Set{setplanmodifier.UseStateForUnknown()},
-			},
-			"version": schema.Int64Attribute{
-				Computed:    true,
-				Description: "The number of the version carrying the config.",
-			},
-			"version_id": schema.StringAttribute{
-				Computed: true,
-			},
-		},
-	}
-}
-
-// ConfigValidators states the one rule the schema cannot: `model` carries one
-// format's settings, so the two nested attributes are alternatives.
-func (r *agentResource) ConfigValidators(_ context.Context) []resource.ConfigValidator {
-	return []resource.ConfigValidator{
-		resourcevalidator.ExactlyOneOf(
-			path.MatchRoot("model").AtName(client.FormatAnthropic),
-			path.MatchRoot("model").AtName(client.FormatOpenAIResponses),
-		),
-	}
+	resp.Schema = agentSchema()
 }
 
 func (r *agentResource) Configure(_ context.Context, req resource.ConfigureRequest, resp *resource.ConfigureResponse) {
@@ -316,11 +61,10 @@ func (r *agentResource) Configure(_ context.Context, req resource.ConfigureReque
 
 // configChanged reports whether an apply would publish a new version: the
 // config the plan sends differs from the one the agent's latest version
-// carries. The two are compared as the configs they become, so respelling an
-// absent grant list as an empty one publishes nothing. A plan value known
-// only after apply could be anything, so it counts as a change.
+// carries. The two are compared as the configs they become. A plan value
+// known only after apply could be anything, so it counts as a change.
 func configChanged(ctx context.Context, plan, state agentModel) (bool, diag.Diagnostics) {
-	known, diags := fullyKnown(ctx, plan.ModelProviderID, plan.SystemPrompt, plan.Model, plan.MCPServers, plan.Skills)
+	known, diags := fullyKnown(ctx, plan.configValues()...)
 	if diags.HasError() || !known {
 		return true, diags
 	}
@@ -360,201 +104,6 @@ func (r *agentResource) ModifyPlan(ctx context.Context, req resource.ModifyPlanR
 	resp.Diagnostics.Append(resp.Plan.Set(ctx, &plan)...)
 }
 
-// modelConfig reads the variant `model` carries into the wire format it
-// names.
-func (m agentModelConfig) modelConfig() (client.ModelConfig, diag.Diagnostics) {
-	var diags diag.Diagnostics
-	switch {
-	case m.Anthropic != nil && m.OpenAIResponses == nil:
-		return client.AnthropicModel{
-			Model:                m.Anthropic.Name.ValueString(),
-			MaxTokens:            m.Anthropic.MaxTokens.ValueInt64(),
-			ContextWindow:        m.Anthropic.ContextWindow.ValueInt64(),
-			ThinkingBudgetTokens: int64Pointer(m.Anthropic.ThinkingBudgetTokens),
-		}, diags
-	case m.OpenAIResponses != nil && m.Anthropic == nil:
-		return client.OpenAIResponsesModel{
-			Model:           m.OpenAIResponses.Name.ValueString(),
-			MaxTokens:       m.OpenAIResponses.MaxTokens.ValueInt64(),
-			ContextWindow:   m.OpenAIResponses.ContextWindow.ValueInt64(),
-			ReasoningEffort: stringPointer(m.OpenAIResponses.ReasoningEffort),
-		}, diags
-	}
-	diags.AddAttributeError(path.Root("model"), "Ambiguous model",
-		"Set exactly one of model."+client.FormatAnthropic+" and model."+client.FormatOpenAIResponses+".")
-	return nil, diags
-}
-
-// modelObject is the `model` attribute holding one wire format's settings.
-func modelObject(ctx context.Context, config client.ModelConfig) (types.Object, diag.Diagnostics) {
-	var diags diag.Diagnostics
-	variants := map[string]attr.Value{
-		client.FormatAnthropic:       types.ObjectNull(anthropicModelTypes),
-		client.FormatOpenAIResponses: types.ObjectNull(openaiResponsesModelTypes),
-	}
-	var variant basetypes.ObjectValue
-	var d diag.Diagnostics
-	switch model := config.(type) {
-	case client.AnthropicModel:
-		variant, d = types.ObjectValueFrom(ctx, anthropicModelTypes, anthropicModelConfig{
-			Name:                 types.StringValue(model.Model),
-			MaxTokens:            types.Int64Value(model.MaxTokens),
-			ContextWindow:        types.Int64Value(model.ContextWindow),
-			ThinkingBudgetTokens: optionalInt64(model.ThinkingBudgetTokens),
-		})
-	case client.OpenAIResponsesModel:
-		variant, d = types.ObjectValueFrom(ctx, openaiResponsesModelTypes, openaiResponsesModelConfig{
-			Name:            types.StringValue(model.Model),
-			MaxTokens:       types.Int64Value(model.MaxTokens),
-			ContextWindow:   types.Int64Value(model.ContextWindow),
-			ReasoningEffort: types.StringPointerValue(model.ReasoningEffort),
-		})
-	}
-	diags.Append(d...)
-	variants[config.Format()] = variant
-
-	object, d := types.ObjectValue(agentModelTypes, variants)
-	diags.Append(d...)
-	return object, diags
-}
-
-// agentConfig reads the config a version should carry out of a model whose
-// values are all known.
-func agentConfig(ctx context.Context, m agentModel) (client.AgentConfig, diag.Diagnostics) {
-	var diags diag.Diagnostics
-	var model agentModelConfig
-	diags.Append(m.Model.As(ctx, &model, basetypes.ObjectAsOptions{})...)
-	var servers []mcpServerModel
-	if _, ok := planned(m.MCPServers).Get(); ok {
-		diags.Append(m.MCPServers.ElementsAs(ctx, &servers, false)...)
-	}
-	var skills []skillGrantModel
-	if _, ok := planned(m.Skills).Get(); ok {
-		diags.Append(m.Skills.ElementsAs(ctx, &skills, false)...)
-	}
-	if diags.HasError() {
-		return client.AgentConfig{}, diags
-	}
-	wire, d := model.modelConfig()
-	diags.Append(d...)
-	if diags.HasError() {
-		return client.AgentConfig{}, diags
-	}
-
-	config := client.AgentConfig{
-		ModelProviderID: m.ModelProviderID.ValueString(),
-		SystemPrompt:    stringPointer(m.SystemPrompt),
-		Model:           wire,
-	}
-	for _, server := range servers {
-		var tools []toolRuleModel
-		if _, ok := planned(server.Tools).Get(); ok {
-			diags.Append(server.Tools.ElementsAs(ctx, &tools, false)...)
-		}
-		grant := client.MCPGrant{
-			Name:          server.Name.ValueString(),
-			URL:           server.URL.ValueString(),
-			DefaultPolicy: server.DefaultPolicy.ValueString(),
-		}
-		for _, tool := range tools {
-			grant.Tools = append(grant.Tools, client.ToolRule{
-				Name:   tool.Name.ValueString(),
-				Policy: tool.Policy.ValueString(),
-			})
-		}
-		config.MCP = append(config.MCP, grant)
-	}
-	for _, skill := range skills {
-		config.Skills = append(config.Skills, client.SkillGrant{
-			Name:    skill.Name.ValueString(),
-			SkillID: skill.SkillID.ValueString(),
-			Version: int64Pointer(skill.Version),
-		})
-	}
-	return config.Canonical(), diags
-}
-
-func optionalInt64(n *int64) types.Int64 {
-	if n == nil {
-		return types.Int64Null()
-	}
-	return types.Int64Value(*n)
-}
-
-// emptyList is an empty list where the prior value spelled one, and null
-// where it did not, so reading back an empty grant list is no change.
-func emptyList(prior types.List, elem attr.Type) types.List {
-	if _, ok := planned(prior).Get(); ok {
-		return types.ListValueMust(elem, []attr.Value{})
-	}
-	return types.ListNull(elem)
-}
-
-// setAgentConfig writes a version's config into m. prior decides how an
-// empty list reads.
-func setAgentConfig(ctx context.Context, m *agentModel, config client.AgentConfig, prior agentModel) diag.Diagnostics {
-	var diags diag.Diagnostics
-	m.ModelProviderID = types.StringValue(config.ModelProviderID)
-	m.SystemPrompt = types.StringPointerValue(config.SystemPrompt)
-
-	model, d := modelObject(ctx, config.Model)
-	diags.Append(d...)
-	m.Model = model
-
-	priorTools := map[string]types.List{}
-	if _, ok := planned(prior.MCPServers).Get(); ok {
-		var servers []mcpServerModel
-		diags.Append(prior.MCPServers.ElementsAs(ctx, &servers, false)...)
-		for _, server := range servers {
-			priorTools[server.Name.ValueString()] = server.Tools
-		}
-	}
-
-	if len(config.MCP) == 0 {
-		m.MCPServers = emptyList(prior.MCPServers, mcpServerType)
-	} else {
-		servers := make([]mcpServerModel, 0, len(config.MCP))
-		for _, grant := range config.MCP {
-			tools := emptyList(priorTools[grant.Name], toolRuleType)
-			if len(grant.Tools) > 0 {
-				rules := make([]toolRuleModel, 0, len(grant.Tools))
-				for _, tool := range grant.Tools {
-					rules = append(rules, toolRuleModel{
-						Name:   types.StringValue(tool.Name),
-						Policy: types.StringValue(tool.Policy),
-					})
-				}
-				tools, d = types.ListValueFrom(ctx, toolRuleType, rules)
-				diags.Append(d...)
-			}
-			servers = append(servers, mcpServerModel{
-				Name:          types.StringValue(grant.Name),
-				URL:           types.StringValue(grant.URL),
-				DefaultPolicy: types.StringValue(grant.DefaultPolicy),
-				Tools:         tools,
-			})
-		}
-		m.MCPServers, d = types.ListValueFrom(ctx, mcpServerType, servers)
-		diags.Append(d...)
-	}
-
-	if len(config.Skills) == 0 {
-		m.Skills = emptyList(prior.Skills, skillGrantType)
-	} else {
-		grants := make([]skillGrantModel, 0, len(config.Skills))
-		for _, grant := range config.Skills {
-			grants = append(grants, skillGrantModel{
-				Name:    types.StringValue(grant.Name),
-				SkillID: types.StringValue(grant.SkillID),
-				Version: optionalInt64(grant.Version),
-			})
-		}
-		m.Skills, d = types.ListValueFrom(ctx, skillGrantType, grants)
-		diags.Append(d...)
-	}
-	return diags
-}
-
 // read refreshes m from the server. found is false when the agent is gone.
 func (r *agentResource) read(ctx context.Context, m *agentModel) (found bool, diags diag.Diagnostics) {
 	id := m.ID.ValueString()
@@ -566,7 +115,6 @@ func (r *agentResource) read(ctx context.Context, m *agentModel) (found bool, di
 		apiError(&diags, "read agent "+id, err)
 		return true, diags
 	}
-	prior := *m
 	m.WorkspaceID = types.StringValue(agent.WorkspaceID)
 	m.Name = types.StringValue(agent.Name)
 
@@ -576,11 +124,7 @@ func (r *agentResource) read(ctx context.Context, m *agentModel) (found bool, di
 		return true, diags
 	}
 	if version == nil {
-		m.ModelProviderID = types.StringNull()
-		m.SystemPrompt = types.StringNull()
-		m.Model = types.ObjectNull(agentModelTypes)
-		m.MCPServers = types.ListNull(mcpServerType)
-		m.Skills = types.ListNull(skillGrantType)
+		clearAgentConfig(m)
 		m.Version = types.Int64Null()
 		m.VersionID = types.StringNull()
 	} else {
@@ -589,7 +133,7 @@ func (r *agentResource) read(ctx context.Context, m *agentModel) (found bool, di
 			diags.AddError("Unreadable agent version", err.Error())
 			return true, diags
 		}
-		diags.Append(setAgentConfig(ctx, m, config, prior)...)
+		diags.Append(setAgentConfig(ctx, m, config)...)
 		m.Version = types.Int64Value(version.Version)
 		m.VersionID = types.StringValue(version.ID)
 	}
@@ -647,19 +191,13 @@ func (r *agentResource) Create(ctx context.Context, req resource.CreateRequest, 
 	}
 	// Recorded before the steps below, so a failure there taints this agent
 	// rather than orphaning it.
-	created := agentModel{
-		ID:              types.StringValue(agent.ID),
-		WorkspaceID:     types.StringValue(agent.WorkspaceID),
-		Name:            types.StringValue(agent.Name),
-		ModelProviderID: plan.ModelProviderID,
-		SystemPrompt:    plan.SystemPrompt,
-		Model:           plan.Model,
-		MCPServers:      plan.MCPServers,
-		Skills:          plan.Skills,
-		AllowedOrigins:  types.SetNull(types.StringType),
-		Version:         types.Int64Null(),
-		VersionID:       types.StringNull(),
-	}
+	created := plan
+	created.ID = types.StringValue(agent.ID)
+	created.WorkspaceID = types.StringValue(agent.WorkspaceID)
+	created.Name = types.StringValue(agent.Name)
+	created.AllowedOrigins = types.SetNull(types.StringType)
+	created.Version = types.Int64Null()
+	created.VersionID = types.StringNull()
 
 	steps := []step{r.publish(ctx, agent.ID, config)}
 	if origins, ok := allowed.Get(); ok {

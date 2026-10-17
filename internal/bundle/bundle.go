@@ -1,6 +1,9 @@
-// Package bundle packs a skill bundle directory into the gzipped tar the
-// skill upload routes take, and fingerprints a bundle so a local directory
+// Package bundle packs a skill or function bundle directory into the gzipped
+// tar the upload routes take, and fingerprints a bundle so a local directory
 // and a stored version compare without downloading either.
+//
+// The rest of this comment is about skills; function.go says what a function
+// bundle holds.
 //
 // What goes into the archive mirrors what `subako skill push` packs: every
 // regular file under the directory under its "/"-joined relative path, a
@@ -67,7 +70,7 @@ func Read(dir string) (*Bundle, error) {
 		return nil, fmt.Errorf("%s is not a directory", dir)
 	}
 
-	walked, err := walk(dir)
+	walked, err := walk(dir, MaxFileBytes)
 	if err != nil {
 		return nil, err
 	}
@@ -93,7 +96,7 @@ func Read(dir string) (*Bundle, error) {
 		}
 		size := int64(len(content))
 		if size > MaxFileBytes {
-			return nil, overFile(file.path)
+			return nil, overFile(file.path, MaxFileBytes)
 		}
 		read += size
 		if read > MaxTotalBytes {
@@ -119,9 +122,9 @@ type walkedFile struct {
 }
 
 // walk lists the regular files under dir, refusing a symlink and a file over
-// the per-file cap as it meets them. Sizes come from the directory entry, so
+// maxFileBytes as it meets them. Sizes come from the directory entry, so
 // the per-file cap is answered for every file, whatever the others spend.
-func walk(dir string) ([]walkedFile, error) {
+func walk(dir string, maxFileBytes int64) ([]walkedFile, error) {
 	var files []walkedFile
 	err := filepath.WalkDir(dir, func(path string, entry fs.DirEntry, err error) error {
 		if err != nil {
@@ -137,8 +140,8 @@ func walk(dir string) ([]walkedFile, error) {
 		if err != nil {
 			return err
 		}
-		if info.Size() > MaxFileBytes {
-			return overFile(path)
+		if info.Size() > maxFileBytes {
+			return overFile(path, maxFileBytes)
 		}
 		rel, err := filepath.Rel(dir, path)
 		if err != nil {
@@ -153,8 +156,8 @@ func walk(dir string) ([]walkedFile, error) {
 	return files, nil
 }
 
-func overFile(path string) error {
-	return fmt.Errorf("%s is more than the %d bytes one file may carry", path, MaxFileBytes)
+func overFile(path string, maxFileBytes int64) error {
+	return fmt.Errorf("%s is more than the %d bytes one file may carry", path, maxFileBytes)
 }
 
 func overTotal(dir string) error {
@@ -207,13 +210,18 @@ func Hash(entries []Entry) string {
 	return "sha256:" + hex.EncodeToString(h.Sum(nil))
 }
 
-// Pack builds the archive. Every header's mtime is zero and its mode fixed,
-// so the bytes depend on the bundle's content and nothing else.
+// Pack builds the archive.
 func (b *Bundle) Pack() ([]byte, error) {
+	return pack(b.Files)
+}
+
+// pack writes files into a gzipped tar. Every header's mtime is zero and its
+// mode fixed, so the bytes depend on the files' content and nothing else.
+func pack(files []File) ([]byte, error) {
 	var buf bytes.Buffer
 	gz := gzip.NewWriter(&buf)
 	tw := tar.NewWriter(gz)
-	for _, f := range b.Files {
+	for _, f := range files {
 		header := &tar.Header{
 			Name:     f.Path,
 			Mode:     0o644,
