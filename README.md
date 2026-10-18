@@ -102,7 +102,7 @@ configuration cannot spend credit.
 | `subako_agent` | An agent: its model, system prompt, MCP servers, skills, sandboxes, functions, volume, built-in servers, and allowed origins |
 | `subako_skill` | A skill, published from a directory of files |
 | `subako_function` | A function package, published from a built bundle directory |
-| `subako_model_provider` | A model upstream bound to your own API key |
+| `subako_model_provider` | A model upstream bound to your own API key, or to a role in your own AWS account |
 | `subako_vault` | A vault an agent's sessions draw credentials from |
 | `subako_vault_credential` | One credential in a vault: for an MCP server, or headers sent to HTTP origins |
 | `subako_oauth_client` | An OAuth client you created at a provider, which vault credentials connect through |
@@ -111,6 +111,7 @@ configuration cannot spend credit.
 | --- | --- |
 | `subako_model_providers` | Every model provider the workspace can use, including the ones Subako publishes |
 | `subako_workspace` | The workspace the credential acts in |
+| `subako_workload_identity` | The issuer and subject a cloud account trusts so a model provider can authenticate as the workspace |
 
 ### Terraform owns an agent's whole config
 
@@ -246,6 +247,54 @@ resource "subako_model_provider" "anthropic" {
   api_key_wo_version = 1
 }
 ```
+
+### A model provider can hold no secret at all
+
+A model provider on Amazon Bedrock can authenticate as an IAM role in your
+own AWS account instead of with a key. Subako issues the workspace a
+short-lived token, and the role's trust policy decides whether to admit it:
+
+```hcl
+data "subako_workload_identity" "this" {}
+
+resource "aws_iam_openid_connect_provider" "subako" {
+  url            = data.subako_workload_identity.this.issuer
+  client_id_list = [data.subako_workload_identity.this.aws.audience]
+}
+
+resource "aws_iam_role" "subako_bedrock" {
+  name = "subako-bedrock"
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect    = "Allow"
+      Principal = { Federated = aws_iam_openid_connect_provider.subako.arn }
+      Action    = "sts:AssumeRoleWithWebIdentity"
+      Condition = {
+        StringEquals = {
+          "${data.subako_workload_identity.this.aws.issuer_key}:aud" = data.subako_workload_identity.this.aws.audience
+          "${data.subako_workload_identity.this.aws.issuer_key}:sub" = data.subako_workload_identity.this.subject
+        }
+      }
+    }]
+  })
+}
+
+resource "subako_model_provider" "bedrock" {
+  format       = "anthropic"
+  display_name = "Claude on Bedrock"
+  base_url     = "https://bedrock-runtime.us-east-1.amazonaws.com/anthropic"
+  aws_web_identity = {
+    role_arn = aws_iam_role.subako_bedrock.arn
+    region   = "us-east-1"
+  }
+}
+```
+
+The role also needs `bedrock:InvokeModel` and
+`bedrock:InvokeModelWithResponseStream` on the models it calls. Subako refuses
+a role that does not admit this workspace, or that admits any other, so the
+`sub` condition is required.
 
 ## Development
 

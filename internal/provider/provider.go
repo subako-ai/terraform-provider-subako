@@ -236,5 +236,6 @@ func (p *subakoProvider) DataSources(_ context.Context) []func() datasource.Data
 	return []func() datasource.DataSource{
 		newModelProvidersDataSource,
 		newWorkspaceDataSource,
+		newWorkloadIdentityDataSource,
 	}
 }

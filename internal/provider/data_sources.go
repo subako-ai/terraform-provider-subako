@@ -2,6 +2,7 @@ package provider
 
 import (
 	"context"
+	"strings"
 
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
 	"github.com/hashicorp/terraform-plugin-framework/datasource/schema"
@@ -13,6 +14,7 @@ import (
 var (
 	_ datasource.DataSourceWithConfigure = (*modelProvidersDataSource)(nil)
 	_ datasource.DataSourceWithConfigure = (*workspaceDataSource)(nil)
+	_ datasource.DataSourceWithConfigure = (*workloadIdentityDataSource)(nil)
 )
 
 func newModelProvidersDataSource() datasource.DataSource {
@@ -173,5 +175,87 @@ func (d *workspaceDataSource) Read(ctx context.Context, req datasource.ReadReque
 		ID:             types.StringValue(workspace.ID),
 		Name:           types.StringValue(workspace.Name),
 		OrganizationID: types.StringValue(workspace.OrganizationID),
+	})...)
+}
+
+func newWorkloadIdentityDataSource() datasource.DataSource {
+	return &workloadIdentityDataSource{}
+}
+
+// workloadIdentityDataSource reads what a cloud account registers and trusts
+// so that the workspace's model providers authenticate as the workspace.
+type workloadIdentityDataSource struct {
+	client *client.Client
+}
+
+type workloadIdentityModel struct {
+	Issuer  types.String             `tfsdk:"issuer"`
+	Subject types.String             `tfsdk:"subject"`
+	AWS     awsWorkloadIdentityModel `tfsdk:"aws"`
+}
+
+type awsWorkloadIdentityModel struct {
+	Audience  types.String `tfsdk:"audience"`
+	IssuerKey types.String `tfsdk:"issuer_key"`
+}
+
+func (d *workloadIdentityDataSource) Metadata(_ context.Context, req datasource.MetadataRequest, resp *datasource.MetadataResponse) {
+	resp.TypeName = req.ProviderTypeName + "_workload_identity"
+}
+
+func (d *workloadIdentityDataSource) Schema(_ context.Context, _ datasource.SchemaRequest, resp *datasource.SchemaResponse) {
+	resp.Schema = schema.Schema{
+		Description: "The workspace as an OpenID Connect subject: what a cloud account registers " +
+			"and trusts so that a `subako_model_provider` with `aws_web_identity` authenticates " +
+			"as the workspace, with no secret handed over.",
+		Attributes: map[string]schema.Attribute{
+			"issuer": schema.StringAttribute{
+				Computed: true,
+				Description: "The issuer every workspace token names. Register it as an identity " +
+					"provider in the cloud account.",
+			},
+			"subject": schema.StringAttribute{
+				Computed: true,
+				Description: "The `sub` of this workspace's tokens, and of no other workspace's: " +
+					"the value a role's trust policy pins.",
+			},
+			"aws": schema.SingleNestedAttribute{
+				Computed: true,
+				Attributes: map[string]schema.Attribute{
+					"audience": schema.StringAttribute{
+						Computed: true,
+						Description: "The client id to register the issuer under in IAM " +
+							"(`aws_iam_openid_connect_provider.client_id_list`), and the `aud` a " +
+							"role's trust policy checks.",
+					},
+					"issuer_key": schema.StringAttribute{
+						Computed: true,
+						Description: "The issuer without its scheme, which IAM prefixes its condition " +
+							"keys with: a trust policy pins `<issuer_key>:sub` and checks " +
+							"`<issuer_key>:aud`.",
+					},
+				},
+			},
+		},
+	}
+}
+
+func (d *workloadIdentityDataSource) Configure(_ context.Context, req datasource.ConfigureRequest, resp *datasource.ConfigureResponse) {
+	d.client = clientFrom(req.ProviderData, &resp.Diagnostics)
+}
+
+func (d *workloadIdentityDataSource) Read(ctx context.Context, _ datasource.ReadRequest, resp *datasource.ReadResponse) {
+	identity, err := d.client.GetWorkloadIdentity(ctx)
+	if err != nil {
+		apiError(&resp.Diagnostics, "read workload identity", err)
+		return
+	}
+	resp.Diagnostics.Append(resp.State.Set(ctx, &workloadIdentityModel{
+		Issuer:  types.StringValue(identity.Issuer),
+		Subject: types.StringValue(identity.Subject),
+		AWS: awsWorkloadIdentityModel{
+			Audience:  types.StringValue(identity.AWS.Audience),
+			IssuerKey: types.StringValue(strings.TrimPrefix(identity.Issuer, "https://")),
+		},
 	})...)
 }

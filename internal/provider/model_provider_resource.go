@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/hashicorp/terraform-plugin-framework-validators/int64validator"
+	"github.com/hashicorp/terraform-plugin-framework-validators/resourcevalidator"
 	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
 	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/path"
@@ -19,30 +20,55 @@ import (
 )
 
 var (
-	_ resource.ResourceWithConfigure   = (*modelProviderResource)(nil)
-	_ resource.ResourceWithImportState = (*modelProviderResource)(nil)
+	_ resource.ResourceWithConfigure        = (*modelProviderResource)(nil)
+	_ resource.ResourceWithConfigValidators = (*modelProviderResource)(nil)
+	_ resource.ResourceWithImportState      = (*modelProviderResource)(nil)
 )
 
 func newModelProviderResource() resource.Resource {
 	return &modelProviderResource{}
 }
 
-// modelProviderResource is a workspace's own model provider, bound to its
-// own API key. The key is write-only: it never reaches the plan or the
-// state, and the API never returns it, so `api_key_wo_version` is what names
-// which key the provider holds, and bumping it rotates the key in place.
+// modelProviderResource is a workspace's own model provider, bound either to
+// its own API key or to a role in its own AWS account. The key is
+// write-only: it never reaches the plan or the state, and the API never
+// returns it, so `api_key_wo_version` is what names which key the provider
+// holds, and bumping it rotates the key in place. A role holds no secret, so
+// it is read back and kept in the state like any other setting.
 type modelProviderResource struct {
 	client *client.Client
 }
 
 type modelProviderModel struct {
-	ID            types.String `tfsdk:"id"`
-	Format        types.String `tfsdk:"format"`
-	DisplayName   types.String `tfsdk:"display_name"`
-	Description   types.String `tfsdk:"description"`
-	BaseURL       types.String `tfsdk:"base_url"`
-	APIKey        types.String `tfsdk:"api_key_wo"`
-	APIKeyVersion types.Int64  `tfsdk:"api_key_wo_version"`
+	ID             types.String         `tfsdk:"id"`
+	Format         types.String         `tfsdk:"format"`
+	DisplayName    types.String         `tfsdk:"display_name"`
+	Description    types.String         `tfsdk:"description"`
+	BaseURL        types.String         `tfsdk:"base_url"`
+	APIKey         types.String         `tfsdk:"api_key_wo"`
+	APIKeyVersion  types.Int64          `tfsdk:"api_key_wo_version"`
+	AWSWebIdentity *awsWebIdentityModel `tfsdk:"aws_web_identity"`
+}
+
+type awsWebIdentityModel struct {
+	RoleARN types.String `tfsdk:"role_arn"`
+	Region  types.String `tfsdk:"region"`
+}
+
+// auth is the identity as the API spells it.
+func (m *awsWebIdentityModel) auth() *client.ModelProviderAuth {
+	return client.AWSWebIdentity(m.RoleARN.ValueString(), m.Region.ValueString())
+}
+
+// sameAWSWebIdentity tells whether two configurations name the same role in
+// the same region, either of them possibly absent.
+func sameAWSWebIdentity(a, b *awsWebIdentityModel) bool {
+	switch {
+	case a == nil || b == nil:
+		return a == b
+	default:
+		return a.RoleARN.Equal(b.RoleARN) && a.Region.Equal(b.Region)
+	}
 }
 
 func (r *modelProviderResource) Metadata(_ context.Context, req resource.MetadataRequest, resp *resource.MetadataResponse) {
@@ -51,11 +77,13 @@ func (r *modelProviderResource) Metadata(_ context.Context, req resource.Metadat
 
 func (r *modelProviderResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *resource.SchemaResponse) {
 	resp.Schema = schema.Schema{
-		Description: "A model provider bound to the workspace's own API key, which a bumped " +
-			"`api_key_wo_version` rotates in place. Deleting it deletes it: agent versions that " +
-			"still name it can no longer run. Use `create_before_destroy` on a change that does " +
-			"replace one agents use -- a changed `format` -- so they publish versions naming the " +
-			"new one first.",
+		Description: "A model provider bound to the workspace's own credential: an API key, " +
+			"which a bumped `api_key_wo_version` rotates in place, or a role in the workspace's " +
+			"own AWS account (`aws_web_identity`), which holds no secret. Set exactly one; " +
+			"switching between them updates the provider in place. Deleting it deletes it: agent " +
+			"versions that still name it can no longer run. Use `create_before_destroy` on a " +
+			"change that does replace one agents use -- a changed `format` -- so they publish " +
+			"versions naming the new one first.",
 		Attributes: map[string]schema.Attribute{
 			"id": schema.StringAttribute{
 				Computed:      true,
@@ -82,29 +110,66 @@ func (r *modelProviderResource) Schema(_ context.Context, _ resource.SchemaReque
 			"base_url": schema.StringAttribute{
 				Required: true,
 				Description: "The upstream base URL, as the format's own client spells it: " +
-					"`https://api.anthropic.com` or `https://api.openai.com/v1`. The API does not " +
-					"return it, so a change made outside Terraform goes unnoticed.",
+					"`https://api.anthropic.com` or `https://api.openai.com/v1`. With " +
+					"`aws_web_identity`, the region's Bedrock runtime: " +
+					"`https://bedrock-runtime.<region>.amazonaws.com` followed by `/anthropic` for " +
+					"`anthropic` or `/openai/v1` for `openai_responses`. The API does not return " +
+					"it, so a change made outside Terraform goes unnoticed.",
 				// CODESYNC(model-provider-base-url-len)
 				Validators: []validator.String{charsBetween(1, 2048)},
 			},
 			"api_key_wo": schema.StringAttribute{
-				Required:  true,
+				Optional:  true,
 				Sensitive: true,
 				WriteOnly: true,
 				Description: "The upstream API key. Write-only: never stored in the plan or the state. " +
-					"It travels when the provider is created and whenever `api_key_wo_version` changes.",
+					"It travels when the provider is created, whenever `api_key_wo_version` " +
+					"changes, and when the provider switches to it from `aws_web_identity`.",
 				// CODESYNC(model-provider-api-key-len)
 				Validators: []validator.String{charsBetween(1, 16384)},
 			},
 			"api_key_wo_version": schema.Int64Attribute{
-				Required: true,
-				Description: "Which `api_key_wo` this provider holds. Bump it to send a new one, " +
-					"which rotates the key in place: the provider keeps its id and the agent " +
-					"versions naming it keep running. Required, so a rotation is always " +
-					"expressible -- a changed `api_key_wo` alone is invisible to Terraform.",
+				Optional: true,
+				Description: "Which `api_key_wo` this provider holds, required beside it. Bump it " +
+					"to send a new one, which rotates the key in place: the provider keeps its " +
+					"id and the agent versions naming it keep running. A changed `api_key_wo` " +
+					"alone is invisible to Terraform, so this is what makes a rotation " +
+					"expressible.",
 				Validators: []validator.Int64{int64validator.AtLeast(0)},
 			},
+			"aws_web_identity": schema.SingleNestedAttribute{
+				Optional: true,
+				Description: "Authenticate as an IAM role in the workspace's own AWS account " +
+					"instead of with a key: each call is signed as the role, assumed with a " +
+					"short-lived token Subako issues for the workspace. Register the " +
+					"`subako_workload_identity` issuer in the role's account and pin the role's " +
+					"trust policy to its `subject`: Subako refuses a role that does not admit " +
+					"this workspace, or that admits any other.",
+				Attributes: map[string]schema.Attribute{
+					"role_arn": schema.StringAttribute{
+						Required:    true,
+						Description: "The role to assume, `arn:aws:iam::<account>:role/<name>`.",
+						// CODESYNC(aws-role-arn-len)
+						Validators: []validator.String{charsBetween(1, 2048)},
+					},
+					"region": schema.StringAttribute{
+						Required:    true,
+						Description: "The region the role's signatures are scoped to, which `base_url` names.",
+						// CODESYNC(aws-region-len)
+						Validators: []validator.String{charsBetween(1, 32)},
+					},
+				},
+			},
 		},
+	}
+}
+
+// ConfigValidators asks for exactly one credential, and for a key's version
+// beside the key.
+func (r *modelProviderResource) ConfigValidators(_ context.Context) []resource.ConfigValidator {
+	return []resource.ConfigValidator{
+		resourcevalidator.ExactlyOneOf(path.MatchRoot("api_key_wo"), path.MatchRoot("aws_web_identity")),
+		resourcevalidator.RequiredTogether(path.MatchRoot("api_key_wo"), path.MatchRoot("api_key_wo_version")),
 	}
 }
 
@@ -116,6 +181,20 @@ func setModelProvider(m *modelProviderModel, p *client.ModelProvider) {
 	m.Format = types.StringValue(p.Format)
 	m.DisplayName = types.StringValue(p.DisplayName)
 	m.Description = types.StringValue(p.Description)
+	// A server that does not say how the provider authenticates leaves the
+	// state as it stands.
+	if p.Auth == nil {
+		return
+	}
+	switch p.Auth.Type {
+	case client.AuthAWSWebIdentity:
+		m.AWSWebIdentity = &awsWebIdentityModel{
+			RoleARN: types.StringValue(p.Auth.RoleARN),
+			Region:  types.StringValue(p.Auth.Region),
+		}
+	default:
+		m.AWSWebIdentity = nil
+	}
 }
 
 // The kinds of model provider `ModelProviderOwnerBody` tells apart.
@@ -152,13 +231,19 @@ func (r *modelProviderResource) Create(ctx context.Context, req resource.CreateR
 	if resp.Diagnostics.HasError() {
 		return
 	}
-	provider, err := r.client.CreateModelProvider(ctx, client.NewModelProvider{
+	create := client.NewModelProvider{
 		Format:      plan.Format.ValueString(),
 		DisplayName: plan.DisplayName.ValueString(),
 		Description: plan.Description.ValueString(),
 		BaseURL:     plan.BaseURL.ValueString(),
-		APIKey:      config.APIKey.ValueString(),
-	})
+	}
+	switch identity := plan.AWSWebIdentity; identity {
+	case nil:
+		create.APIKey = config.APIKey.ValueString()
+	default:
+		create.Auth = identity.auth()
+	}
+	provider, err := r.client.CreateModelProvider(ctx, create)
 	if err != nil {
 		apiError(&resp.Diagnostics, "create model provider", err)
 		return
@@ -190,12 +275,19 @@ func (r *modelProviderResource) Update(ctx context.Context, req resource.UpdateR
 		Description: plan.Description.ValueString(),
 		BaseURL:     plan.BaseURL.ValueString(),
 	}
-	// The key is write-only, so the version is the only thing that tells a
-	// rotation from an apply leaving the key as it stands. A version the
-	// state never held -- an imported provider's -- is a change like any
-	// other, and the configuration's key becomes the provider's. The value
-	// itself lives in the configuration, never in the plan.
-	if !plannedInt64(plan.APIKeyVersion).Equal(plannedInt64(state.APIKeyVersion)) {
+	// A credential is sent only when it changes, and a new one replaces the
+	// stored one whole. A role is compared as the state holds it. The key is
+	// write-only, so its version is the only thing that tells a rotation from
+	// an apply leaving the key as it stands; a version the state never held
+	// -- an imported provider's -- is a change like any other, and so is a
+	// switch from a role, and the configuration's key becomes the provider's.
+	// The value itself lives in the configuration, never in the plan.
+	switch identity := plan.AWSWebIdentity; {
+	case identity != nil:
+		if !sameAWSWebIdentity(identity, state.AWSWebIdentity) {
+			update.Auth = identity.auth()
+		}
+	case state.AWSWebIdentity != nil || !plannedInt64(plan.APIKeyVersion).Equal(plannedInt64(state.APIKeyVersion)):
 		key := config.APIKey.ValueString()
 		update.APIKey = &key
 	}
