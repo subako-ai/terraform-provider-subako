@@ -12,6 +12,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"regexp"
 	"sort"
 	"strings"
@@ -32,8 +33,12 @@ type fakeAPI struct {
 	agents      map[string]*fakeAgent
 	skills      map[string]*fakeSkill
 	functions   map[string]*fakeFunction
-	vaults      map[string]*fakeVault
-	providers   map[string]*fakeProvider
+	// oauthClients holds each OAuth client as the server answers it, and
+	// oauthSecrets every token endpoint auth sent for one, in order.
+	oauthClients map[string]map[string]any
+	oauthSecrets map[string][]map[string]any
+	vaults       map[string]*fakeVault
+	providers    map[string]*fakeProvider
 	// apiKeys records the model provider key each provider holds, by
 	// provider id.
 	apiKeys map[string]string
@@ -83,6 +88,8 @@ func newFakeAPI(t *testing.T) (*fakeAPI, *httptest.Server) {
 		agents:       map[string]*fakeAgent{},
 		skills:       map[string]*fakeSkill{},
 		functions:    map[string]*fakeFunction{},
+		oauthClients: map[string]map[string]any{},
+		oauthSecrets: map[string][]map[string]any{},
 		vaults:       map[string]*fakeVault{},
 		providers:    map[string]*fakeProvider{},
 		apiKeys:      map[string]string{},
@@ -144,6 +151,10 @@ var routes = []route{
 	on("DELETE", "/v1/functions/"+seg, (*fakeAPI).deleteFunction),
 	on("POST", "/v1/functions/"+seg+"/versions", (*fakeAPI).pushFunction),
 	on("GET", "/v1/functions/"+seg+"/versions", (*fakeAPI).listFunctionVersions),
+	on("POST", "/v1/oauth-clients", (*fakeAPI).createOAuthClient),
+	on("GET", "/v1/oauth-clients/"+seg, (*fakeAPI).getOAuthClient),
+	on("PATCH", "/v1/oauth-clients/"+seg, (*fakeAPI).updateOAuthClient),
+	on("DELETE", "/v1/oauth-clients/"+seg, (*fakeAPI).deleteOAuthClient),
 	on("POST", "/v1/vaults", (*fakeAPI).createVault),
 	on("GET", "/v1/vaults/"+seg, (*fakeAPI).getVault),
 	on("PATCH", "/v1/vaults/"+seg, (*fakeAPI).updateVault),
@@ -722,6 +733,95 @@ func (a *fakeAPI) listFunctionVersions(r *http.Request, args []string) (int, any
 		return 404, notFound
 	}
 	return 200, page(r, function.Versions)
+}
+
+// normalizedEndpoint spells a URL as the server stores one: a lowercase
+// host, and `/` for an empty path.
+func normalizedEndpoint(raw any) (string, bool) {
+	text, _ := raw.(string)
+	u, err := url.Parse(text)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.Fragment != "" {
+		return "", false
+	}
+	u.Host = strings.ToLower(u.Host)
+	if u.Path == "" {
+		u.Path = "/"
+	}
+	return u.String(), true
+}
+
+// tokenEndpointAuth reads a `TokenEndpointAuthBody` as the server does,
+// answering the method it names.
+func tokenEndpointAuth(raw any) (string, bool) {
+	auth, _ := raw.(map[string]any)
+	switch auth["method"] {
+	case "none":
+		return "none", len(auth) == 1
+	case "client_secret_post", "client_secret_basic":
+		secret, _ := auth["client_secret"].(string)
+		return auth["method"].(string), secret != "" && len(auth) == 2
+	}
+	return "", false
+}
+
+func (a *fakeAPI) createOAuthClient(r *http.Request, _ []string) (int, any) {
+	body := decode(r)
+	authorization, okA := normalizedEndpoint(body["authorization_endpoint"])
+	token, okT := normalizedEndpoint(body["token_endpoint"])
+	method, okM := tokenEndpointAuth(body["token_endpoint_auth"])
+	if !okA || !okT || !okM {
+		return 400, errBody("invalid_request", "malformed request body")
+	}
+	id := newID()
+	a.oauthClients[id] = map[string]any{
+		"id": id, "workspace_id": a.workspaceID, "display_name": body["display_name"],
+		"authorization_endpoint": authorization, "token_endpoint": token, "client_id": body["client_id"],
+		"token_endpoint_auth_method": method, "scopes": body["scopes"],
+		"authorization_params": body["authorization_params"],
+		"created_at":           "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
+	}
+	a.oauthSecrets[id] = append(a.oauthSecrets[id], body["token_endpoint_auth"].(map[string]any))
+	return 201, map[string]any{"id": id}
+}
+
+func (a *fakeAPI) getOAuthClient(_ *http.Request, args []string) (int, any) {
+	oauthClient, ok := a.oauthClients[args[0]]
+	if !ok {
+		return 404, notFound
+	}
+	return 200, oauthClient
+}
+
+func (a *fakeAPI) updateOAuthClient(r *http.Request, args []string) (int, any) {
+	oauthClient, ok := a.oauthClients[args[0]]
+	if !ok {
+		return 404, notFound
+	}
+	body := decode(r)
+	for key, value := range body {
+		switch key {
+		case "display_name", "scopes", "authorization_params":
+			oauthClient[key] = value
+		case "token_endpoint_auth":
+			method, ok := tokenEndpointAuth(value)
+			if !ok {
+				return 400, errBody("invalid_request", "malformed token_endpoint_auth")
+			}
+			oauthClient["token_endpoint_auth_method"] = method
+			a.oauthSecrets[args[0]] = append(a.oauthSecrets[args[0]], value.(map[string]any))
+		default:
+			return 400, errBody("invalid_request", "unknown field `"+key+"`")
+		}
+	}
+	return 200, oauthClient
+}
+
+func (a *fakeAPI) deleteOAuthClient(_ *http.Request, args []string) (int, any) {
+	if _, ok := a.oauthClients[args[0]]; !ok {
+		return 404, notFound
+	}
+	delete(a.oauthClients, args[0])
+	return 204, nil
 }
 
 func (a *fakeAPI) createVault(r *http.Request, _ []string) (int, any) {

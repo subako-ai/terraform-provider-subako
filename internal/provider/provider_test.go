@@ -135,9 +135,10 @@ func checkEmpty(api *fakeAPI) resource.TestCheckFunc {
 	return func(*terraform.State) error {
 		api.mu.Lock()
 		defer api.mu.Unlock()
-		if len(api.agents) > 0 || len(api.skills) > 0 || len(api.functions) > 0 || len(api.vaults) > 0 {
-			return fmt.Errorf("left behind: %d agents, %d skills, %d functions, %d vaults",
-				len(api.agents), len(api.skills), len(api.functions), len(api.vaults))
+		if len(api.agents) > 0 || len(api.skills) > 0 || len(api.functions) > 0 || len(api.vaults) > 0 ||
+			len(api.oauthClients) > 0 {
+			return fmt.Errorf("left behind: %d agents, %d skills, %d functions, %d vaults, %d OAuth clients",
+				len(api.agents), len(api.skills), len(api.functions), len(api.vaults), len(api.oauthClients))
 		}
 		for id, p := range api.providers {
 			if p.Body["type"] == "byok" {

@@ -228,6 +228,7 @@ func (p *subakoProvider) Resources(_ context.Context) []func() resource.Resource
 		newModelProviderResource,
 		newVaultResource,
 		newVaultCredentialResource,
+		newOAuthClientResource,
 	}
 }
 
