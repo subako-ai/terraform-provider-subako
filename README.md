@@ -2,7 +2,8 @@
 
 Manage a [Subako](https://subako.ai) workspace as code: the agents it runs, the
 skills and function packages they load, the model providers they call, and the
-vaults holding the credentials they present.
+vaults holding the credentials they present, with the OAuth clients those
+credentials connect through.
 
 ```hcl
 terraform {
@@ -103,7 +104,8 @@ configuration cannot spend credit.
 | `subako_function` | A function package, published from a built bundle directory |
 | `subako_model_provider` | A model upstream bound to your own API key |
 | `subako_vault` | A vault an agent's sessions draw credentials from |
-| `subako_vault_credential` | One credential in a vault: a static bearer token or an OAuth grant |
+| `subako_vault_credential` | One credential in a vault: for an MCP server, or headers sent to HTTP origins |
+| `subako_oauth_client` | An OAuth client you created at a provider, which vault credentials connect through |
 
 | Data source | Reads |
 | --- | --- |
@@ -175,10 +177,60 @@ resource "subako_function" "github" {
 An agent granting it with no `version` follows the latest one from each new
 session on, so pushing a version needs no new agent version.
 
+### A credential is for an MCP server or for HTTP origins
+
+`mcp` authenticates against one MCP server; `http` is sent as headers with
+every request a function makes to its origins, which an agent's function grant
+names under `http_credentials`:
+
+```hcl
+resource "subako_vault_credential" "github_api" {
+  vault_id           = subako_vault.team.id
+  secrets_wo_version = 1
+
+  http = {
+    origins = ["https://api.github.com"]
+    headers = [{ name = "authorization", value_wo = "Bearer ${var.github_token}" }]
+  }
+}
+```
+
+A credential cannot change in place, so any change replaces it, and bumping
+`secrets_wo_version` is how new secret values are sent.
+
+### OAuth clients are managed here, their sign-ins in the console
+
+Some providers register no OAuth client on the spot: Google's APIs, for one.
+Create the client at the provider, register the redirect URI the console's
+OAuth clients page shows, and describe the client with `subako_oauth_client`.
+Its credentials are connected in the console, since each needs a person to
+sign in:
+
+```hcl
+resource "subako_oauth_client" "google" {
+  display_name           = "Google"
+  authorization_endpoint = "https://accounts.google.com/o/oauth2/v2/auth"
+  token_endpoint         = "https://oauth2.googleapis.com/token"
+  client_id              = "1234.apps.googleusercontent.com"
+
+  token_endpoint_auth      = { client_secret_post = { client_secret_wo = var.google_client_secret } }
+  client_secret_wo_version = 1
+
+  scopes               = ["https://www.googleapis.com/auth/drive.readonly"]
+  authorization_params = [{ name = "access_type", value = "offline" }]
+}
+```
+
+The endpoints and `client_id` are fixed once the client exists, so changing one
+replaces it, and a client a credential was connected through cannot be
+deleted. Everything else changes in place, and a credential picks up a new
+secret on its next refresh.
+
 ### Secrets stay out of your state
 
 Every argument carrying a secret is write-only: `api_key_wo` on a model
-provider, `token_wo` and `access_token_wo` on a credential. Terraform sends
+provider, `client_secret_wo` on an OAuth client, `token_wo` and
+`access_token_wo` on a credential. Terraform sends
 them and forgets them. A companion `*_wo_version` argument is what you change
 to send a new value:
 

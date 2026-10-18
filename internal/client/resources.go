@@ -270,7 +270,8 @@ type Vault struct {
 	Metadata    json.RawMessage `json:"metadata"`
 }
 
-type vaultCreated struct {
+// createdID is the id a create route answers with and nothing more.
+type createdID struct {
 	ID string `json:"id"`
 }
 
@@ -287,7 +288,7 @@ func (c *Client) CreateVault(ctx context.Context, displayName string, metadata m
 	if err != nil {
 		return "", err
 	}
-	var out vaultCreated
+	var out createdID
 	if err := c.do(ctx, req, &out); err != nil {
 		return "", err
 	}
@@ -325,25 +326,89 @@ func metadataObject(metadata map[string]string) map[string]string {
 	return metadata
 }
 
-// Credential is `CredentialBody`: metadata only.
+// Protocols a credential speaks, as `CredentialBody` tags them.
+const (
+	ProtocolMCP  = "mcp"
+	ProtocolHTTP = "http"
+)
+
+// Credential is `CredentialBody`: metadata only. Target is an `mcp`
+// credential's; Origins and Headers are an `http` one's.
 type Credential struct {
-	ID          string `json:"id"`
-	VaultID     string `json:"vault_id"`
-	Protocol    string `json:"protocol"`
-	AuthScheme  string `json:"auth_scheme"`
-	Target      string `json:"target"`
-	DisplayName string `json:"display_name"`
+	ID          string                 `json:"id"`
+	VaultID     string                 `json:"vault_id"`
+	Protocol    string                 `json:"protocol"`
+	AuthScheme  string                 `json:"auth_scheme"`
+	Target      string                 `json:"target"`
+	Origins     []string               `json:"origins"`
+	Headers     []CredentialHeaderName `json:"headers"`
+	DisplayName string                 `json:"display_name"`
 }
 
-// NewCredential is `AddCredentialBody`. Payload carries the secret.
-type NewCredential struct {
-	Protocol    string            `json:"protocol"`
-	Target      string            `json:"target"`
-	DisplayName string            `json:"display_name"`
-	Payload     CredentialPayload `json:"payload"`
+// CredentialHeaderName is `CredentialHeaderNameBody`: a header an `http`
+// credential is sent as, without its value.
+type CredentialHeaderName struct {
+	Name string `json:"name"`
 }
 
-// Auth schemes, as `AuthSchemeBody` spells them.
+// NewMCPCredential is `AddCredentialBody` for an MCP server. Payload carries
+// the secret.
+type NewMCPCredential struct {
+	Target      string
+	DisplayName string
+	Payload     CredentialPayload
+}
+
+func (c NewMCPCredential) MarshalJSON() ([]byte, error) {
+	return json.Marshal(struct {
+		Protocol    string            `json:"protocol"`
+		Target      string            `json:"target"`
+		DisplayName string            `json:"display_name"`
+		Payload     CredentialPayload `json:"payload"`
+	}{ProtocolMCP, c.Target, c.DisplayName, c.Payload})
+}
+
+// NewHTTPCredential is `AddCredentialBody` for HTTP origins: headers sent
+// with every request to them. Each header's value is a secret.
+type NewHTTPCredential struct {
+	Origins     []string
+	DisplayName string
+	Headers     []CredentialHeader
+}
+
+// CredentialHeader is `CredentialHeaderBody`.
+type CredentialHeader struct {
+	Name  string `json:"name"`
+	Value string `json:"value"`
+}
+
+// AuthHeader is how an `http` credential given headers authenticates.
+const AuthHeader = "header"
+
+func (c NewHTTPCredential) MarshalJSON() ([]byte, error) {
+	type payload struct {
+		AuthScheme string             `json:"auth_scheme"`
+		Headers    []CredentialHeader `json:"headers"`
+	}
+	return json.Marshal(struct {
+		Protocol    string   `json:"protocol"`
+		Origins     []string `json:"origins"`
+		DisplayName string   `json:"display_name"`
+		Payload     payload  `json:"payload"`
+	}{ProtocolHTTP, orEmpty(c.Origins), c.DisplayName, payload{AuthHeader, orEmpty(c.Headers)}})
+}
+
+// NewCredential is a new credential's body: NewMCPCredential or
+// NewHTTPCredential.
+type NewCredential interface {
+	json.Marshaler
+	sealedNewCredential()
+}
+
+func (NewMCPCredential) sealedNewCredential()  {}
+func (NewHTTPCredential) sealedNewCredential() {}
+
+// Auth schemes, as `McpSchemeBody` spells them.
 const (
 	AuthStaticBearer = "static_bearer"
 	AuthOAuth        = "oauth"
@@ -409,7 +474,7 @@ func (c *Client) AddCredential(ctx context.Context, vaultID string, credential N
 	if err != nil {
 		return "", err
 	}
-	var out vaultCreated
+	var out createdID
 	if err := c.do(ctx, req, &out); err != nil {
 		return "", err
 	}
@@ -434,6 +499,146 @@ func (c *Client) FindCredential(ctx context.Context, vaultID, credentialID strin
 func (c *Client) DeleteCredential(ctx context.Context, vaultID, credentialID string) error {
 	path := vaultPath(vaultID) + "/credentials/" + url.PathEscape(credentialID)
 	return c.do(ctx, request{method: http.MethodDelete, path: path}, nil)
+}
+
+// OAuthClient is `OAuthClientBody`: a client the workspace created at a
+// provider, which vault credentials connect through. It carries no secret.
+type OAuthClient struct {
+	ID                      string               `json:"id"`
+	WorkspaceID             string               `json:"workspace_id"`
+	DisplayName             string               `json:"display_name"`
+	AuthorizationEndpoint   string               `json:"authorization_endpoint"`
+	TokenEndpoint           string               `json:"token_endpoint"`
+	ClientID                string               `json:"client_id"`
+	TokenEndpointAuthMethod string               `json:"token_endpoint_auth_method"`
+	Scopes                  []string             `json:"scopes"`
+	AuthorizationParams     []AuthorizationParam `json:"authorization_params"`
+}
+
+// AuthorizationParam is `AuthorizationParamBody`: a parameter the
+// authorization URL carries beside the ones Subako sets.
+type AuthorizationParam struct {
+	Name  string `json:"name"`
+	Value string `json:"value"`
+}
+
+// Token endpoint auth methods, as `TokenEndpointAuthMethodBody` spells them.
+const (
+	TokenEndpointAuthNone              = "none"
+	TokenEndpointAuthClientSecretPost  = "client_secret_post"
+	TokenEndpointAuthClientSecretBasic = "client_secret_basic"
+)
+
+// TokenEndpointAuth is `TokenEndpointAuthBody`: how Subako authenticates at
+// the provider's token endpoint as the client. The three types below are its
+// only forms, and each writes its own method tag.
+type TokenEndpointAuth interface {
+	json.Marshaler
+	// Method is the tag the wire carries.
+	Method() string
+	sealedTokenEndpointAuth()
+}
+
+type (
+	// PublicClient authenticates with PKCE alone.
+	PublicClient struct{}
+	// ClientSecretPost sends the client secret in the token request's form.
+	ClientSecretPost struct {
+		ClientSecret string
+	}
+	// ClientSecretBasic sends the client secret in a `Basic` header.
+	ClientSecretBasic struct {
+		ClientSecret string
+	}
+)
+
+func (PublicClient) Method() string      { return TokenEndpointAuthNone }
+func (ClientSecretPost) Method() string  { return TokenEndpointAuthClientSecretPost }
+func (ClientSecretBasic) Method() string { return TokenEndpointAuthClientSecretBasic }
+
+func (PublicClient) sealedTokenEndpointAuth()      {}
+func (ClientSecretPost) sealedTokenEndpointAuth()  {}
+func (ClientSecretBasic) sealedTokenEndpointAuth() {}
+
+type clientSecretBody struct {
+	Method       string `json:"method"`
+	ClientSecret string `json:"client_secret"`
+}
+
+func (a PublicClient) MarshalJSON() ([]byte, error) {
+	return json.Marshal(struct {
+		Method string `json:"method"`
+	}{a.Method()})
+}
+
+func (a ClientSecretPost) MarshalJSON() ([]byte, error) {
+	return json.Marshal(clientSecretBody{Method: a.Method(), ClientSecret: a.ClientSecret})
+}
+
+func (a ClientSecretBasic) MarshalJSON() ([]byte, error) {
+	return json.Marshal(clientSecretBody{Method: a.Method(), ClientSecret: a.ClientSecret})
+}
+
+// NewOAuthClient is `CreateOAuthClientBody`.
+type NewOAuthClient struct {
+	DisplayName           string               `json:"display_name"`
+	AuthorizationEndpoint string               `json:"authorization_endpoint"`
+	TokenEndpoint         string               `json:"token_endpoint"`
+	ClientID              string               `json:"client_id"`
+	TokenEndpointAuth     TokenEndpointAuth    `json:"token_endpoint_auth"`
+	Scopes                []string             `json:"scopes"`
+	AuthorizationParams   []AuthorizationParam `json:"authorization_params"`
+}
+
+// OAuthClientUpdate is `UpdateOAuthClientBody`. The provider always knows
+// the whole client, so every field but the auth is sent; a nil
+// TokenEndpointAuth leaves the method and the secret as they stand.
+type OAuthClientUpdate struct {
+	DisplayName         string               `json:"display_name"`
+	TokenEndpointAuth   TokenEndpointAuth    `json:"token_endpoint_auth,omitempty"`
+	Scopes              []string             `json:"scopes"`
+	AuthorizationParams []AuthorizationParam `json:"authorization_params"`
+}
+
+func oauthClientPath(id string) string {
+	return "/v1/oauth-clients/" + url.PathEscape(id)
+}
+
+// CreateOAuthClient answers the new client's id; the server returns nothing
+// more.
+func (c *Client) CreateOAuthClient(ctx context.Context, oauthClient NewOAuthClient) (string, error) {
+	oauthClient.Scopes = orEmpty(oauthClient.Scopes)
+	oauthClient.AuthorizationParams = orEmpty(oauthClient.AuthorizationParams)
+	req, err := jsonRequest(http.MethodPost, "/v1/oauth-clients", oauthClient)
+	if err != nil {
+		return "", err
+	}
+	var out createdID
+	if err := c.do(ctx, req, &out); err != nil {
+		return "", err
+	}
+	return out.ID, nil
+}
+
+func (c *Client) GetOAuthClient(ctx context.Context, id string) (*OAuthClient, error) {
+	var out OAuthClient
+	err := c.do(ctx, request{method: http.MethodGet, path: oauthClientPath(id)}, &out)
+	return &out, err
+}
+
+func (c *Client) UpdateOAuthClient(ctx context.Context, id string, update OAuthClientUpdate) (*OAuthClient, error) {
+	update.Scopes = orEmpty(update.Scopes)
+	update.AuthorizationParams = orEmpty(update.AuthorizationParams)
+	req, err := jsonRequest(http.MethodPatch, oauthClientPath(id), update)
+	if err != nil {
+		return nil, err
+	}
+	var out OAuthClient
+	return &out, c.do(ctx, req, &out)
+}
+
+func (c *Client) DeleteOAuthClient(ctx context.Context, id string) error {
+	return c.do(ctx, request{method: http.MethodDelete, path: oauthClientPath(id)}, nil)
 }
 
 // ModelProvider is `ModelProviderBody`: a platform provider or a workspace's

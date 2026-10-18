@@ -1,13 +1,15 @@
 # Most of what this provider manages, in one workspace: an agent, the model
-# provider it calls, the skill it loads, and the vault its sessions draw
-# credentials from. A `subako_function` needs a built bundle, so the agent
-# below grants one of the packages the platform ships instead.
+# provider it calls, the skill it loads, the vault its sessions draw
+# credentials from, and an OAuth client credentials can connect through. A
+# `subako_function` needs a built bundle, so the agent below grants one of the
+# packages the platform ships instead.
 #
 #   subako workspace use <name>
 #   terraform init
-#   TF_VAR_anthropic_api_key=... TF_VAR_github_token=... terraform apply
+#   TF_VAR_anthropic_api_key=... TF_VAR_github_token=... \
+#     TF_VAR_google_client_secret=... terraform apply
 #
-# Neither secret below reaches the state: both are write-only arguments.
+# None of the secrets below reaches the state: each is a write-only argument.
 
 terraform {
   # Write-only arguments need Terraform 1.11.
@@ -30,6 +32,13 @@ provider "subako" {}
 
 variable "anthropic_api_key" {
   description = "The key this workspace's own Anthropic provider holds. Never stored in the state."
+  type        = string
+  sensitive   = true
+  ephemeral   = true
+}
+
+variable "google_client_secret" {
+  description = "The secret of the OAuth client created in Google Cloud. Never stored in the state."
   type        = string
   sensitive   = true
   ephemeral   = true
@@ -113,15 +122,47 @@ resource "subako_vault" "team" {
 
 resource "subako_vault_credential" "github" {
   vault_id     = subako_vault.team.id
-  target       = "https://api.githubcopilot.com/mcp/"
   display_name = "GitHub"
 
-  static_bearer = {
-    token_wo = var.github_token
+  mcp = {
+    target = "https://api.githubcopilot.com/mcp/"
+    auth   = { static_bearer = { token_wo = var.github_token } }
   }
 
   # Bump to send a new token.
   secrets_wo_version = 1
+}
+
+# The same token, sent with every request a function makes to GitHub's REST
+# API.
+resource "subako_vault_credential" "github_api" {
+  vault_id     = subako_vault.team.id
+  display_name = "GitHub API"
+
+  http = {
+    origins = ["https://api.github.com"]
+    headers = [{ name = "authorization", value_wo = "Bearer ${var.github_token}" }]
+  }
+
+  secrets_wo_version = 1
+}
+
+# A client created in Google Cloud, with the redirect URI the console's OAuth
+# clients page shows registered there. Credentials connect through it in the
+# console, each with a person's sign-in.
+resource "subako_oauth_client" "google" {
+  display_name           = "Google"
+  authorization_endpoint = "https://accounts.google.com/o/oauth2/v2/auth"
+  token_endpoint         = "https://oauth2.googleapis.com/token"
+  client_id              = "1234.apps.googleusercontent.com"
+
+  token_endpoint_auth = { client_secret_post = { client_secret_wo = var.google_client_secret } }
+
+  # Bump to send a new secret, in place.
+  client_secret_wo_version = 1
+
+  scopes               = ["https://www.googleapis.com/auth/drive.readonly"]
+  authorization_params = [{ name = "access_type", value = "offline" }]
 }
 
 output "agent_id" {
