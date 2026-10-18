@@ -863,24 +863,72 @@ func (a *fakeAPI) deleteVault(_ *http.Request, args []string) (int, any) {
 	return 204, nil
 }
 
+// normalizedOrigin spells an origin as the server stores one: a lowercase
+// host, no default port, nothing past the authority.
+func normalizedOrigin(raw any) (string, bool) {
+	text, _ := raw.(string)
+	u, err := url.Parse(text)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" ||
+		(u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.Fragment != "" {
+		return "", false
+	}
+	host := strings.ToLower(u.Hostname())
+	if port := u.Port(); port != "" && !(u.Scheme == "https" && port == "443") && !(u.Scheme == "http" && port == "80") {
+		host += ":" + port
+	}
+	return u.Scheme + "://" + host, true
+}
+
 func (a *fakeAPI) addCredential(r *http.Request, args []string) (int, any) {
 	vault, ok := a.vaults[args[0]]
 	if !ok {
 		return 404, notFound
 	}
 	body := decode(r)
-	for _, c := range vault.Credentials {
-		if c["target"] == body["target"] {
-			return 409, errBody("conflict", "credential target already exists")
-		}
-	}
 	payload := body["payload"].(map[string]any)
 	credentialID := newID()
-	vault.Credentials = append(vault.Credentials, map[string]any{
+	credential := map[string]any{
 		"id": credentialID, "vault_id": args[0], "protocol": body["protocol"],
-		"auth_scheme": payload["auth_scheme"], "target": body["target"],
-		"display_name": body["display_name"],
-	})
+		"auth_scheme": payload["auth_scheme"], "oauth_client_id": nil,
+		"display_name": body["display_name"], "status": "active",
+	}
+	switch body["protocol"] {
+	case "mcp":
+		for _, c := range vault.Credentials {
+			if c["target"] == body["target"] {
+				return 409, errBody("conflict", "credential target already exists")
+			}
+		}
+		credential["target"] = body["target"]
+	case "http":
+		taken := map[string]bool{}
+		for _, c := range vault.Credentials {
+			origins, _ := c["origins"].([]any)
+			for _, origin := range origins {
+				taken[origin.(string)] = true
+			}
+		}
+		var origins []any
+		for _, raw := range body["origins"].([]any) {
+			origin, ok := normalizedOrigin(raw)
+			if !ok {
+				return 400, errBody("invalid_request", "Invalid http credential origin")
+			}
+			if taken[origin] {
+				return 409, errBody("conflict", "another credential in the vault is sent to "+origin)
+			}
+			origins = append(origins, origin)
+		}
+		var names []any
+		for _, header := range payload["headers"].([]any) {
+			names = append(names, map[string]any{"name": strings.ToLower(header.(map[string]any)["name"].(string))})
+		}
+		credential["origins"] = origins
+		credential["headers"] = names
+	default:
+		return 400, errBody("invalid_request", "unknown protocol")
+	}
+	vault.Credentials = append(vault.Credentials, credential)
 	a.secrets[credentialID] = payload
 	return 201, map[string]any{"id": credentialID}
 }

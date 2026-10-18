@@ -122,14 +122,28 @@ resource "subako_vault" "team" {
 
 resource "subako_vault_credential" "github" {
   vault_id     = subako_vault.team.id
-  target       = "https://api.githubcopilot.com/mcp/"
   display_name = "GitHub"
 
-  static_bearer = {
-    token_wo = var.github_token
+  mcp = {
+    target = "https://api.githubcopilot.com/mcp/"
+    auth   = { static_bearer = { token_wo = var.github_token } }
   }
 
   # Bump to send a new token.
+  secrets_wo_version = 1
+}
+
+# The same token, sent with every request a function makes to GitHub's REST
+# API.
+resource "subako_vault_credential" "github_api" {
+  vault_id     = subako_vault.team.id
+  display_name = "GitHub API"
+
+  http = {
+    origins = ["https://api.github.com"]
+    headers = [{ name = "authorization", value_wo = "Bearer ${var.github_token}" }]
+  }
+
   secrets_wo_version = 1
 }
 

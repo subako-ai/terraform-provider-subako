@@ -843,13 +843,13 @@ resource "subako_vault" "v" {
 }
 
 resource "subako_vault_credential" "c" {
-  vault_id       = subako_vault.v.id
-  target         = "https://mcp.example.test/"
-  display_name   = %q
+  vault_id           = subako_vault.v.id
+  display_name       = %q
   secrets_wo_version = 1
 
-  static_bearer = {
-    token_wo = "secret-token"
+  mcp = {
+    target = "https://mcp.example.test/"
+    auth   = { static_bearer = { token_wo = "secret-token" } }
   }
 }
 `, credentialName)
@@ -870,8 +870,10 @@ func TestAVaultCredentialIsReplacedOnChange(t *testing.T) {
 					statecheck.ExpectKnownValue("subako_vault.v", tfjsonpath.New("metadata"),
 						knownvalue.MapExact(map[string]knownvalue.Check{"team": knownvalue.StringExact("support")})),
 					statecheck.ExpectKnownValue("subako_vault_credential.c",
-						tfjsonpath.New("static_bearer").AtMapKey("token_wo"), knownvalue.Null()),
-					statecheck.ExpectKnownValue("subako_vault_credential.c", tfjsonpath.New("oauth"), knownvalue.Null()),
+						tfjsonpath.New("mcp").AtMapKey("auth").AtMapKey("static_bearer").AtMapKey("token_wo"), knownvalue.Null()),
+					statecheck.ExpectKnownValue("subako_vault_credential.c",
+						tfjsonpath.New("mcp").AtMapKey("auth").AtMapKey("oauth"), knownvalue.Null()),
+					statecheck.ExpectKnownValue("subako_vault_credential.c", tfjsonpath.New("http"), knownvalue.Null()),
 				},
 				Check: func(s *terraform.State) error {
 					id := s.RootModule().Resources["subako_vault_credential.c"].Primary.ID
@@ -1007,41 +1009,70 @@ resource "subako_agent" "a" {
 			`between 1 and 200 characters, got: 201`},
 		"a credential naming both auth schemes": {`
 resource "subako_vault_credential" "c" {
-  vault_id       = "v"
-  target         = "https://x"
+  vault_id           = "v"
   secrets_wo_version = 1
-  static_bearer  = { token_wo = "t" }
-  oauth          = { access_token_wo = "t" }
+  mcp = {
+    target = "https://x"
+    auth   = { static_bearer = { token_wo = "t" }, oauth = { access_token_wo = "t" } }
+  }
 }`, `Invalid Attribute Combination`},
 		"a credential naming neither auth scheme": {`
 resource "subako_vault_credential" "c" {
-  vault_id       = "v"
-  target         = "https://x"
+  vault_id           = "v"
+  secrets_wo_version = 1
+  mcp                = { target = "https://x", auth = {} }
+}`, `Missing Attribute Configuration`},
+		"a credential for both protocols": {`
+resource "subako_vault_credential" "c" {
+  vault_id           = "v"
+  secrets_wo_version = 1
+  mcp  = { target = "https://x", auth = { static_bearer = { token_wo = "t" } } }
+  http = { origins = ["https://x"], headers = [{ name = "authorization", value_wo = "t" }] }
+}`, `Invalid Attribute Combination`},
+		"a credential for neither protocol": {`
+resource "subako_vault_credential" "c" {
+  vault_id           = "v"
   secrets_wo_version = 1
 }`, `Missing Attribute Configuration`},
+		"an http credential sent as a header a proxy owns": {`
+resource "subako_vault_credential" "c" {
+  vault_id           = "v"
+  secrets_wo_version = 1
+  http = { origins = ["https://x"], headers = [{ name = "Host", value_wo = "t" }] }
+}`, `name`},
+		"an http credential sent to no origin": {`
+resource "subako_vault_credential" "c" {
+  vault_id           = "v"
+  secrets_wo_version = 1
+  http = { origins = [], headers = [{ name = "authorization", value_wo = "t" }] }
+}`, `origins`},
 		"a refresh block without its token endpoint": {`
 resource "subako_vault_credential" "c" {
-  vault_id       = "v"
-  target         = "https://x"
+  vault_id           = "v"
   secrets_wo_version = 1
-  oauth = {
-    access_token_wo = "t"
-    refresh         = { client_id = "c", refresh_token_wo = "r" }
+  mcp = {
+    target = "https://x"
+    auth = { oauth = {
+      access_token_wo = "t"
+      refresh         = { client_id = "c", refresh_token_wo = "r" }
+    } }
   }
 }`, `token_endpoint`},
 		"a token endpoint auth that is not an object": {`
 resource "subako_vault_credential" "c" {
-  vault_id       = "v"
-  target         = "https://x"
+  vault_id           = "v"
   secrets_wo_version = 1
-  oauth = {
-    access_token_wo = "t"
-    refresh = {
-      token_endpoint         = "https://x/token"
-      client_id              = "c"
-      refresh_token_wo       = "r"
-      token_endpoint_auth_wo = jsonencode(["not", "an", "object"])
-    }
+  mcp = {
+    target = "https://x"
+    auth = { oauth = {
+      access_token_wo = "t"
+      refresh = {
+        token_endpoint         = "https://x/token"
+        client_id              = "c"
+        refresh_token_wo       = "r"
+        token_endpoint_auth_wo = jsonencode(["not", "an", "object"])
+      }
+    } }
   }
 }`, `Not a JSON object`},
 	}
@@ -1066,20 +1097,22 @@ resource "subako_vault" "v" {
 }
 
 resource "subako_vault_credential" "c" {
-  vault_id       = subako_vault.v.id
-  target         = "https://mcp.example.test/"
+  vault_id           = subako_vault.v.id
   secrets_wo_version = 1
 
-  oauth = {
-    access_token_wo = "access"
-    expires_at      = "2030-01-01T00:00:00Z"
+  mcp = {
+    target = "https://mcp.example.test/"
+    auth = { oauth = {
+      access_token_wo = "access"
+      expires_at      = "2030-01-01T00:00:00Z"
 
-    refresh = {
-      token_endpoint         = "https://auth.example.test/token"
-      client_id              = "client"
-      refresh_token_wo       = "refresh"
-      token_endpoint_auth_wo = jsonencode({ type = "client_secret_post", client_secret = "s" })
-    }
+      refresh = {
+        token_endpoint         = "https://auth.example.test/token"
+        client_id              = "client"
+        refresh_token_wo       = "refresh"
+        token_endpoint_auth_wo = jsonencode({ type = "client_secret_post", client_secret = "s" })
+      }
+    } }
   }
 }
 `
@@ -1099,13 +1132,14 @@ func TestAnOAuthCredentialSendsItsRefreshBlock(t *testing.T) {
 			Config: providerBlock(server.URL, api.workspaceID) + oauthCredentialHCL,
 			ConfigStateChecks: []statecheck.StateCheck{
 				statecheck.ExpectKnownValue("subako_vault_credential.c",
-					tfjsonpath.New("oauth").AtMapKey("access_token_wo"), knownvalue.Null()),
+					tfjsonpath.New("mcp").AtMapKey("auth").AtMapKey("oauth").AtMapKey("access_token_wo"), knownvalue.Null()),
 				statecheck.ExpectKnownValue("subako_vault_credential.c",
-					tfjsonpath.New("oauth").AtMapKey("refresh").AtMapKey("refresh_token_wo"), knownvalue.Null()),
+					tfjsonpath.New("mcp").AtMapKey("auth").AtMapKey("oauth").AtMapKey("refresh").AtMapKey("refresh_token_wo"), knownvalue.Null()),
 				statecheck.ExpectKnownValue("subako_vault_credential.c",
-					tfjsonpath.New("oauth").AtMapKey("refresh").AtMapKey("client_id"),
+					tfjsonpath.New("mcp").AtMapKey("auth").AtMapKey("oauth").AtMapKey("refresh").AtMapKey("client_id"),
 					knownvalue.StringExact("client")),
-				statecheck.ExpectKnownValue("subako_vault_credential.c", tfjsonpath.New("static_bearer"), knownvalue.Null()),
+				statecheck.ExpectKnownValue("subako_vault_credential.c",
+					tfjsonpath.New("mcp").AtMapKey("auth").AtMapKey("static_bearer"), knownvalue.Null()),
 			},
 			Check: func(s *terraform.State) error {
 				id := s.RootModule().Resources["subako_vault_credential.c"].Primary.ID
@@ -1174,7 +1208,7 @@ func TestAnImportedOAuthCredentialIsReplacedOnTheNextApply(t *testing.T) {
 				ImportState:             true,
 				ImportStateIdFunc:       credentialImportID,
 				ImportStateVerify:       true,
-				ImportStateVerifyIgnore: []string{"secrets_wo_version", "oauth.expires_at", "oauth.refresh"},
+				ImportStateVerifyIgnore: []string{"secrets_wo_version", "mcp.auth.oauth.expires_at", "mcp.auth.oauth.refresh"},
 			},
 			{
 				ResourceName:       "subako_vault_credential.c",

@@ -104,7 +104,7 @@ configuration cannot spend credit.
 | `subako_function` | A function package, published from a built bundle directory |
 | `subako_model_provider` | A model upstream bound to your own API key |
 | `subako_vault` | A vault an agent's sessions draw credentials from |
-| `subako_vault_credential` | One credential in a vault: a static bearer token or an OAuth grant |
+| `subako_vault_credential` | One credential in a vault: for an MCP server, or headers sent to HTTP origins |
 | `subako_oauth_client` | An OAuth client you created at a provider, which vault credentials connect through |
 
 | Data source | Reads |
@@ -176,6 +176,27 @@ resource "subako_function" "github" {
 
 An agent granting it with no `version` follows the latest one from each new
 session on, so pushing a version needs no new agent version.
+
+### A credential is for an MCP server or for HTTP origins
+
+`mcp` authenticates against one MCP server; `http` is sent as headers with
+every request a function makes to its origins, which an agent's function grant
+names under `http_credentials`:
+
+```hcl
+resource "subako_vault_credential" "github_api" {
+  vault_id           = subako_vault.team.id
+  secrets_wo_version = 1
+
+  http = {
+    origins = ["https://api.github.com"]
+    headers = [{ name = "authorization", value_wo = "Bearer ${var.github_token}" }]
+  }
+}
+```
+
+A credential cannot change in place, so any change replaces it, and bumping
+`secrets_wo_version` is how new secret values are sent.
 
 ### OAuth clients are managed here, their sign-ins in the console
 

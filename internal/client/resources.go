@@ -326,25 +326,89 @@ func metadataObject(metadata map[string]string) map[string]string {
 	return metadata
 }
 
-// Credential is `CredentialBody`: metadata only.
+// Protocols a credential speaks, as `CredentialBody` tags them.
+const (
+	ProtocolMCP  = "mcp"
+	ProtocolHTTP = "http"
+)
+
+// Credential is `CredentialBody`: metadata only. Target is an `mcp`
+// credential's; Origins and Headers are an `http` one's.
 type Credential struct {
-	ID          string `json:"id"`
-	VaultID     string `json:"vault_id"`
-	Protocol    string `json:"protocol"`
-	AuthScheme  string `json:"auth_scheme"`
-	Target      string `json:"target"`
-	DisplayName string `json:"display_name"`
+	ID          string                 `json:"id"`
+	VaultID     string                 `json:"vault_id"`
+	Protocol    string                 `json:"protocol"`
+	AuthScheme  string                 `json:"auth_scheme"`
+	Target      string                 `json:"target"`
+	Origins     []string               `json:"origins"`
+	Headers     []CredentialHeaderName `json:"headers"`
+	DisplayName string                 `json:"display_name"`
 }
 
-// NewCredential is `AddCredentialBody`. Payload carries the secret.
-type NewCredential struct {
-	Protocol    string            `json:"protocol"`
-	Target      string            `json:"target"`
-	DisplayName string            `json:"display_name"`
-	Payload     CredentialPayload `json:"payload"`
+// CredentialHeaderName is `CredentialHeaderNameBody`: a header an `http`
+// credential is sent as, without its value.
+type CredentialHeaderName struct {
+	Name string `json:"name"`
 }
 
-// Auth schemes, as `AuthSchemeBody` spells them.
+// NewMCPCredential is `AddCredentialBody` for an MCP server. Payload carries
+// the secret.
+type NewMCPCredential struct {
+	Target      string
+	DisplayName string
+	Payload     CredentialPayload
+}
+
+func (c NewMCPCredential) MarshalJSON() ([]byte, error) {
+	return json.Marshal(struct {
+		Protocol    string            `json:"protocol"`
+		Target      string            `json:"target"`
+		DisplayName string            `json:"display_name"`
+		Payload     CredentialPayload `json:"payload"`
+	}{ProtocolMCP, c.Target, c.DisplayName, c.Payload})
+}
+
+// NewHTTPCredential is `AddCredentialBody` for HTTP origins: headers sent
+// with every request to them. Each header's value is a secret.
+type NewHTTPCredential struct {
+	Origins     []string
+	DisplayName string
+	Headers     []CredentialHeader
+}
+
+// CredentialHeader is `CredentialHeaderBody`.
+type CredentialHeader struct {
+	Name  string `json:"name"`
+	Value string `json:"value"`
+}
+
+// AuthHeader is how an `http` credential given headers authenticates.
+const AuthHeader = "header"
+
+func (c NewHTTPCredential) MarshalJSON() ([]byte, error) {
+	type payload struct {
+		AuthScheme string             `json:"auth_scheme"`
+		Headers    []CredentialHeader `json:"headers"`
+	}
+	return json.Marshal(struct {
+		Protocol    string   `json:"protocol"`
+		Origins     []string `json:"origins"`
+		DisplayName string   `json:"display_name"`
+		Payload     payload  `json:"payload"`
+	}{ProtocolHTTP, orEmpty(c.Origins), c.DisplayName, payload{AuthHeader, orEmpty(c.Headers)}})
+}
+
+// NewCredential is a new credential's body: NewMCPCredential or
+// NewHTTPCredential.
+type NewCredential interface {
+	json.Marshaler
+	sealedNewCredential()
+}
+
+func (NewMCPCredential) sealedNewCredential()  {}
+func (NewHTTPCredential) sealedNewCredential() {}
+
+// Auth schemes, as `McpSchemeBody` spells them.
 const (
 	AuthStaticBearer = "static_bearer"
 	AuthOAuth        = "oauth"
