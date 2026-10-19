@@ -289,6 +289,11 @@ resource "subako_model_provider" "bedrock" {
 }
 ```
 
+IAM can take a few seconds to honour a role it has just created, so an apply
+that creates the role and the provider together may be refused once; applying
+again connects it. The role's permissions are needed only once agents call
+Bedrock, not to connect.
+
 An Anthropic federation rule or an OpenAI workload identity provider is set up
 in that organization's console, matching the same subject whole. The provider
 then names it:
