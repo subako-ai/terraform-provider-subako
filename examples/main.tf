@@ -57,7 +57,7 @@ resource "subako_model_provider" "anthropic" {
   format       = "anthropic"
   display_name = "Anthropic"
   base_url     = "https://api.anthropic.com"
-  api_key_wo   = var.anthropic_api_key
+  auth         = { api_key = { api_key_wo = var.anthropic_api_key } }
 
   # Which key the provider holds. Bump to send a new one, which rotates the
   # key in place: the provider keeps its id.

@@ -3,6 +3,7 @@ package client
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/url"
 )
@@ -642,7 +643,9 @@ func (c *Client) DeleteOAuthClient(ctx context.Context, id string) error {
 }
 
 // ModelProvider is `ModelProviderBody`: a platform provider or a workspace's
-// own, told apart by Type.
+// own, told apart by Type. RawAuth is a workspace provider's auth as it came,
+// which AuthOf reads; a listing never needs it, so an auth this client does
+// not know fails only the read that asks for it.
 type ModelProvider struct {
 	Type        string          `json:"type"`
 	ID          string          `json:"id"`
@@ -651,6 +654,123 @@ type ModelProvider struct {
 	Description string          `json:"description"`
 	WorkspaceID *string         `json:"workspace_id"`
 	Models      []PlatformModel `json:"models"`
+	RawAuth     json.RawMessage `json:"auth"`
+}
+
+// AuthOf reads a workspace provider's `ModelProviderAuthBody` by its tag.
+func (p *ModelProvider) AuthOf() (ModelProviderAuth, error) {
+	var tag struct {
+		Type string `json:"type"`
+	}
+	if err := json.Unmarshal(p.RawAuth, &tag); err != nil {
+		return nil, fmt.Errorf("read model provider auth: %w", err)
+	}
+	switch tag.Type {
+	case AuthAPIKey:
+		return APIKeyAuth{}, nil
+	case AuthAWSWebIdentity:
+		var auth AWSWebIdentityAuth
+		return auth, json.Unmarshal(p.RawAuth, &auth)
+	case AuthAnthropicWorkloadIdentity:
+		var auth AnthropicWorkloadIdentityAuth
+		return auth, json.Unmarshal(p.RawAuth, &auth)
+	case AuthOpenAIWorkloadIdentity:
+		var auth OpenAIWorkloadIdentityAuth
+		return auth, json.Unmarshal(p.RawAuth, &auth)
+	default:
+		return nil, fmt.Errorf("model provider authenticates as %q, which this provider does not manage", tag.Type)
+	}
+}
+
+// Model provider auths, as `ModelProviderAuthInput` tags them.
+const (
+	AuthAPIKey                    = "api_key"
+	AuthAWSWebIdentity            = "aws_web_identity"
+	AuthAnthropicWorkloadIdentity = "anthropic_workload_identity"
+	AuthOpenAIWorkloadIdentity    = "openai_workload_identity"
+)
+
+// ModelProviderAuth is how a workspace provider authenticates upstream:
+// `ModelProviderAuthInput` going in and `ModelProviderAuthBody` coming back.
+// The four types below are its only forms, and each writes its own tag. The
+// API never returns a key, so an APIKeyAuth read back holds none.
+type ModelProviderAuth interface {
+	json.Marshaler
+	// Type is the tag the wire carries.
+	Type() string
+	sealedModelProviderAuth()
+}
+
+type (
+	// APIKeyAuth sends a key the workspace hands over.
+	APIKeyAuth struct {
+		APIKey string
+	}
+	// AWSWebIdentityAuth signs each call as a role in the workspace's own AWS
+	// account.
+	AWSWebIdentityAuth struct {
+		RoleARN string `json:"role_arn"`
+		Region  string `json:"region"`
+	}
+	// AnthropicWorkloadIdentityAuth acts as a service account in the
+	// workspace's own Anthropic organization, under a federation rule there.
+	AnthropicWorkloadIdentityAuth struct {
+		OrganizationID   string  `json:"organization_id"`
+		ServiceAccountID string  `json:"service_account_id"`
+		FederationRuleID string  `json:"federation_rule_id"`
+		WorkspaceID      *string `json:"workspace_id,omitempty"`
+	}
+	// OpenAIWorkloadIdentityAuth acts as a service account in the workspace's
+	// own OpenAI organization, through a workload identity provider there.
+	OpenAIWorkloadIdentityAuth struct {
+		IdentityProviderID string `json:"identity_provider_id"`
+		ServiceAccountID   string `json:"service_account_id"`
+	}
+)
+
+func (APIKeyAuth) Type() string                    { return AuthAPIKey }
+func (AWSWebIdentityAuth) Type() string            { return AuthAWSWebIdentity }
+func (AnthropicWorkloadIdentityAuth) Type() string { return AuthAnthropicWorkloadIdentity }
+func (OpenAIWorkloadIdentityAuth) Type() string    { return AuthOpenAIWorkloadIdentity }
+
+func (APIKeyAuth) sealedModelProviderAuth()                    {}
+func (AWSWebIdentityAuth) sealedModelProviderAuth()            {}
+func (AnthropicWorkloadIdentityAuth) sealedModelProviderAuth() {}
+func (OpenAIWorkloadIdentityAuth) sealedModelProviderAuth()    {}
+
+// tagged writes an auth's fields with its tag beside them.
+func tagged(auth ModelProviderAuth, fields any) ([]byte, error) {
+	encoded, err := json.Marshal(fields)
+	if err != nil {
+		return nil, err
+	}
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal(encoded, &object); err != nil {
+		return nil, err
+	}
+	object["type"], _ = json.Marshal(auth.Type())
+	return json.Marshal(object)
+}
+
+func (a APIKeyAuth) MarshalJSON() ([]byte, error) {
+	return tagged(a, struct {
+		APIKey string `json:"api_key"`
+	}{a.APIKey})
+}
+
+func (a AWSWebIdentityAuth) MarshalJSON() ([]byte, error) {
+	type fields AWSWebIdentityAuth
+	return tagged(a, fields(a))
+}
+
+func (a AnthropicWorkloadIdentityAuth) MarshalJSON() ([]byte, error) {
+	type fields AnthropicWorkloadIdentityAuth
+	return tagged(a, fields(a))
+}
+
+func (a OpenAIWorkloadIdentityAuth) MarshalJSON() ([]byte, error) {
+	type fields OpenAIWorkloadIdentityAuth
+	return tagged(a, fields(a))
 }
 
 // PlatformModel is `PlatformModelBody`.
@@ -662,20 +782,20 @@ type PlatformModel struct {
 
 // NewModelProvider is `CreateWorkspaceModelProviderBody`.
 type NewModelProvider struct {
-	Format      string `json:"format"`
-	DisplayName string `json:"display_name"`
-	Description string `json:"description"`
-	BaseURL     string `json:"base_url"`
-	APIKey      string `json:"api_key"`
+	Format      string            `json:"format"`
+	DisplayName string            `json:"display_name"`
+	Description string            `json:"description"`
+	BaseURL     string            `json:"base_url"`
+	Auth        ModelProviderAuth `json:"auth"`
 }
 
-// ModelProviderUpdate is `UpdateModelProviderBody`. An absent APIKey leaves
-// the stored key as it stands; one sent replaces it.
+// ModelProviderUpdate is `UpdateModelProviderBody`. A nil Auth leaves the
+// stored one as it stands; one sent replaces it whole.
 type ModelProviderUpdate struct {
-	DisplayName string  `json:"display_name"`
-	Description string  `json:"description"`
-	BaseURL     string  `json:"base_url"`
-	APIKey      *string `json:"api_key,omitempty"`
+	DisplayName string            `json:"display_name"`
+	Description string            `json:"description"`
+	BaseURL     string            `json:"base_url"`
+	Auth        ModelProviderAuth `json:"auth,omitempty"`
 }
 
 func modelProviderPath(id string) string {
@@ -712,4 +832,26 @@ func (c *Client) DeleteModelProvider(ctx context.Context, id string) error {
 
 func (c *Client) ListModelProviders(ctx context.Context) ([]ModelProvider, error) {
 	return listAll[ModelProvider](ctx, c, "/v1/model-providers")
+}
+
+// WorkloadIdentity is `WorkloadIdentityBody`: what an AWS account, an
+// Anthropic organization, or an OpenAI organization trusts for the
+// workspace's providers to authenticate as the workspace.
+type WorkloadIdentity struct {
+	Issuer    string           `json:"issuer"`
+	Subject   string           `json:"subject"`
+	AWS       IdentityAudience `json:"aws"`
+	Anthropic IdentityAudience `json:"anthropic"`
+	OpenAI    IdentityAudience `json:"openai"`
+}
+
+// IdentityAudience is the `aud` one target checks.
+type IdentityAudience struct {
+	Audience string `json:"audience"`
+}
+
+func (c *Client) GetWorkloadIdentity(ctx context.Context) (*WorkloadIdentity, error) {
+	var out WorkloadIdentity
+	err := c.do(ctx, request{method: http.MethodGet, path: "/v1/workload-identity"}, &out)
+	return &out, err
 }

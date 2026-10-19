@@ -102,7 +102,7 @@ configuration cannot spend credit.
 | `subako_agent` | An agent: its model, system prompt, MCP servers, skills, sandboxes, functions, volume, built-in servers, and allowed origins |
 | `subako_skill` | A skill, published from a directory of files |
 | `subako_function` | A function package, published from a built bundle directory |
-| `subako_model_provider` | A model upstream bound to your own API key |
+| `subako_model_provider` | A model upstream, reached with your own API key or as the workspace through workload identity federation |
 | `subako_vault` | A vault an agent's sessions draw credentials from |
 | `subako_vault_credential` | One credential in a vault: for an MCP server, or headers sent to HTTP origins |
 | `subako_oauth_client` | An OAuth client you created at a provider, which vault credentials connect through |
@@ -111,6 +111,7 @@ configuration cannot spend credit.
 | --- | --- |
 | `subako_model_providers` | Every model provider the workspace can use, including the ones Subako publishes |
 | `subako_workspace` | The workspace the credential acts in |
+| `subako_workload_identity` | What an AWS account, an Anthropic organization, or an OpenAI organization trusts for a model provider to act as the workspace |
 
 ### Terraform owns an agent's whole config
 
@@ -226,6 +227,104 @@ replaces it, and a client a credential was connected through cannot be
 deleted. Everything else changes in place, and a credential picks up a new
 secret on its next refresh.
 
+### Model providers need no key
+
+A model provider can reach Amazon Bedrock as a role in your AWS account, the
+Claude API as a service account in your Anthropic organization, or the OpenAI
+API as a service account in your OpenAI organization, with no key handed over.
+`subako_workload_identity` reads what that account trusts: the workspace's
+issuer and subject, and each one's audience. With Bedrock, the role can live in
+the same configuration:
+
+```hcl
+data "subako_workload_identity" "this" {}
+
+locals {
+  issuer_host = trimprefix(data.subako_workload_identity.this.issuer, "https://")
+}
+
+resource "aws_iam_openid_connect_provider" "subako" {
+  url            = data.subako_workload_identity.this.issuer
+  client_id_list = [data.subako_workload_identity.this.aws.audience]
+}
+
+data "aws_iam_policy_document" "trust_this_workspace" {
+  statement {
+    actions = ["sts:AssumeRoleWithWebIdentity"]
+    principals {
+      type        = "Federated"
+      identifiers = [aws_iam_openid_connect_provider.subako.arn]
+    }
+    condition {
+      test     = "StringEquals"
+      variable = "${local.issuer_host}:aud"
+      values   = [data.subako_workload_identity.this.aws.audience]
+    }
+    # The whole subject, so the role trusts this workspace and no other.
+    condition {
+      test     = "StringEquals"
+      variable = "${local.issuer_host}:sub"
+      values   = [data.subako_workload_identity.this.subject]
+    }
+  }
+}
+
+resource "aws_iam_role" "bedrock" {
+  name               = "subako-bedrock"
+  assume_role_policy = data.aws_iam_policy_document.trust_this_workspace.json
+}
+
+# ...and a policy letting the role invoke the models it calls.
+
+resource "subako_model_provider" "bedrock" {
+  format       = "anthropic"
+  display_name = "Claude on Bedrock"
+  base_url     = "https://bedrock-runtime.us-east-1.amazonaws.com/anthropic"
+  auth = {
+    aws_web_identity = {
+      role_arn = aws_iam_role.bedrock.arn
+      region   = "us-east-1"
+    }
+  }
+}
+```
+
+An Anthropic federation rule or an OpenAI workload identity provider is set up
+in that organization's console, matching the same subject whole. The provider
+then names it:
+
+```hcl
+resource "subako_model_provider" "claude" {
+  format       = "anthropic"
+  display_name = "Claude, federated"
+  base_url     = "https://api.anthropic.com"
+  auth = {
+    anthropic_workload_identity = {
+      organization_id    = "6f1c2a7e-..."
+      service_account_id = "svac_..."
+      federation_rule_id = "fdrl_..."
+    }
+  }
+}
+
+resource "subako_model_provider" "openai" {
+  format       = "openai_responses"
+  display_name = "OpenAI, federated"
+  base_url     = "https://api.openai.com/v1"
+  auth = {
+    openai_workload_identity = {
+      identity_provider_id = "idp_..."
+      service_account_id   = "user-..."
+    }
+  }
+}
+```
+
+Before a provider is connected, and whenever its `auth` changes, Subako checks
+that the account trusts this workspace and no other, and refuses the apply if
+it does not. A change of `auth` -- a key for a role, a new role -- is made in
+place: the provider keeps its id.
+
 ### Secrets stay out of your state
 
 Every argument carrying a secret is write-only: `api_key_wo` on a model
@@ -239,7 +338,7 @@ resource "subako_model_provider" "anthropic" {
   format       = "anthropic"
   display_name = "Anthropic"
   base_url     = "https://api.anthropic.com"
-  api_key_wo   = var.anthropic_api_key
+  auth         = { api_key = { api_key_wo = var.anthropic_api_key } }
 
   # Bump this to rotate the key. The provider keeps its id, so the agent
   # versions naming it keep running.

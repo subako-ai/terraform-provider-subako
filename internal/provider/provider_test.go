@@ -427,10 +427,12 @@ variable "key" {
 }
 
 resource "subako_model_provider" "p" {
-  format             = %q
-  display_name       = %q
-  base_url           = %q
-  api_key_wo         = var.key
+  format       = %q
+  display_name = %q
+  base_url     = %q
+  auth = {
+    api_key = { api_key_wo = var.key }
+  }
   api_key_wo_version = %d
 }
 `, key, format, name, baseURL, version)
@@ -503,7 +505,7 @@ func TestAModelProviderKeyNeverReachesTheState(t *testing.T) {
 			{
 				Config: head + modelProviderHCL("Mine", "key-1", 1),
 				Check: resource.ComposeAggregateTestCheckFunc(
-					resource.TestCheckNoResourceAttr(modelProviderAddress, "api_key_wo"),
+					resource.TestCheckNoResourceAttr(modelProviderAddress, "auth.api_key.api_key_wo"),
 					resource.TestCheckResourceAttr(modelProviderAddress, "description", ""),
 					providerKeyOf(api, "key-1"),
 					recordProviderID(&firstID),
