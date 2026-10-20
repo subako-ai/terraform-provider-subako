@@ -677,6 +677,228 @@ import {
 	})
 }
 
+// bedrockRole is the role the federated providers below assume.
+const bedrockRole = "arn:aws:iam::123456789012:role/subako-bedrock"
+
+// modelProviderRoleHCL is a workspace provider under `anthropic` that
+// assumes role in region instead of holding a key.
+func modelProviderRoleHCL(role, region string) string {
+	return fmt.Sprintf(`
+resource "subako_model_provider" "p" {
+  format       = "anthropic"
+  display_name = "Claude on Bedrock"
+  base_url     = "https://bedrock-runtime.%[2]s.amazonaws.com/anthropic"
+  aws_web_identity = {
+    role_arn = %[1]q
+    region   = %[2]q
+  }
+}
+`, role, region)
+}
+
+// providerAuthChanges pins how many updates carried a role.
+func providerAuthChanges(api *fakeAPI, want int) resource.TestCheckFunc {
+	return func(s *terraform.State) error {
+		id := s.RootModule().Resources[modelProviderAddress].Primary.ID
+		api.mu.Lock()
+		defer api.mu.Unlock()
+		if got := api.authChanges[id]; got != want {
+			return fmt.Errorf("provider %s took %d role updates, want %d", id, got, want)
+		}
+		return nil
+	}
+}
+
+// providerHoldsNoKey pins that the server holds no key for the provider.
+func providerHoldsNoKey(api *fakeAPI) resource.TestCheckFunc {
+	return func(s *terraform.State) error {
+		id := s.RootModule().Resources[modelProviderAddress].Primary.ID
+		api.mu.Lock()
+		defer api.mu.Unlock()
+		if key, held := api.apiKeys[id]; held {
+			return fmt.Errorf("provider %s holds key %q", id, key)
+		}
+		return nil
+	}
+}
+
+func TestAModelProviderAssumesARoleAndHoldsNoKey(t *testing.T) {
+	api, server := newFakeAPI(t)
+	head := providerBlock(server.URL, api.workspaceID)
+	var firstID string
+
+	resource.UnitTest(t, resource.TestCase{
+		TerraformVersionChecks:   versionChecks,
+		ProtoV6ProviderFactories: factories,
+		CheckDestroy:             checkEmpty(api),
+		Steps: []resource.TestStep{
+			{
+				Config: head + modelProviderRoleHCL(bedrockRole, "us-east-1"),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttr(modelProviderAddress, "aws_web_identity.role_arn", bedrockRole),
+					resource.TestCheckResourceAttr(modelProviderAddress, "aws_web_identity.region", "us-east-1"),
+					resource.TestCheckNoResourceAttr(modelProviderAddress, "api_key_wo_version"),
+					providerHoldsNoKey(api),
+					recordProviderID(&firstID),
+				),
+			},
+			{
+				// The role reads back as it was sent, so there is nothing to do.
+				Config: head + modelProviderRoleHCL(bedrockRole, "us-east-1"),
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{plancheck.ExpectEmptyPlan()},
+				},
+			},
+			{
+				// A new region sends the role again, in place.
+				Config:           head + modelProviderRoleHCL(bedrockRole, "us-west-2"),
+				ConfigPlanChecks: expectAction(plancheck.ResourceActionUpdate),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					sameProviderAs(&firstID),
+					providerAuthChanges(api, 1),
+				),
+			},
+		},
+	})
+}
+
+func TestAModelProviderSwitchesBetweenAKeyAndARoleInPlace(t *testing.T) {
+	api, server := newFakeAPI(t)
+	head := providerBlock(server.URL, api.workspaceID)
+	var firstID string
+
+	resource.UnitTest(t, resource.TestCase{
+		TerraformVersionChecks:   versionChecks,
+		ProtoV6ProviderFactories: factories,
+		CheckDestroy:             checkEmpty(api),
+		Steps: []resource.TestStep{
+			{
+				Config: head + modelProviderHCL("Mine", "key-1", 1),
+				Check:  recordProviderID(&firstID),
+			},
+			{
+				Config:           head + modelProviderRoleHCL(bedrockRole, "us-east-1"),
+				ConfigPlanChecks: expectAction(plancheck.ResourceActionUpdate),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					sameProviderAs(&firstID),
+					providerAuthChanges(api, 1),
+					providerHoldsNoKey(api),
+				),
+			},
+			{
+				// Back to a key: the key travels even though its version is
+				// the one the provider held before the role.
+				Config:           head + modelProviderHCL("Mine", "key-1", 1),
+				ConfigPlanChecks: expectAction(plancheck.ResourceActionUpdate),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					sameProviderAs(&firstID),
+					providerKeyOf(api, "key-1"),
+					providerKeyRotations(api, 1),
+					resource.TestCheckNoResourceAttr(modelProviderAddress, "aws_web_identity"),
+				),
+			},
+		},
+	})
+}
+
+// A role is read back, so one changed outside Terraform is a difference the
+// next apply puts back.
+func TestARoleChangedOutsideTerraformIsPutBack(t *testing.T) {
+	api, server := newFakeAPI(t)
+	head := providerBlock(server.URL, api.workspaceID)
+	elsewhere := func() {
+		for id, p := range api.providers {
+			if p.Body["type"] == "byok" {
+				api.setProviderAuth(id, map[string]any{
+					"type": "aws_web_identity", "role_arn": "arn:aws:iam::123456789012:role/other", "region": "us-east-1",
+				})
+			}
+		}
+	}
+
+	resource.UnitTest(t, resource.TestCase{
+		TerraformVersionChecks:   versionChecks,
+		ProtoV6ProviderFactories: factories,
+		CheckDestroy:             checkEmpty(api),
+		Steps: []resource.TestStep{
+			{Config: head + modelProviderRoleHCL(bedrockRole, "us-east-1")},
+			{
+				PreConfig:        elsewhere,
+				Config:           head + modelProviderRoleHCL(bedrockRole, "us-east-1"),
+				ConfigPlanChecks: expectAction(plancheck.ResourceActionUpdate),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttr(modelProviderAddress, "aws_web_identity.role_arn", bedrockRole),
+					providerAuthChanges(api, 1),
+				),
+			},
+		},
+	})
+}
+
+func TestAModelProviderNamesExactlyOneCredential(t *testing.T) {
+	api, server := newFakeAPI(t)
+	head := providerBlock(server.URL, api.workspaceID)
+	provider := func(credential string) string {
+		return head + `
+variable "key" {
+  type      = string
+  ephemeral = true
+  default   = "key-1"
+}
+
+resource "subako_model_provider" "p" {
+  format       = "anthropic"
+  display_name = "Mine"
+  base_url     = "https://bedrock-runtime.us-east-1.amazonaws.com/anthropic"
+` + credential + `
+}
+`
+	}
+	role := `
+  aws_web_identity = { role_arn = "` + bedrockRole + `", region = "us-east-1" }`
+
+	resource.UnitTest(t, resource.TestCase{
+		TerraformVersionChecks:   versionChecks,
+		ProtoV6ProviderFactories: factories,
+		Steps: []resource.TestStep{
+			{
+				Config:      provider("api_key_wo = var.key\n  api_key_wo_version = 1" + role),
+				ExpectError: regexp.MustCompile(`Invalid Attribute Combination`),
+			},
+			{
+				Config:      provider(""),
+				ExpectError: regexp.MustCompile(`Exactly one of these attributes must be configured`),
+			},
+			{
+				Config:      provider("api_key_wo = var.key"),
+				ExpectError: regexp.MustCompile(`api_key_wo_version`),
+			},
+		},
+	})
+}
+
+func TestTheWorkloadIdentityDataSourceNamesWhatARoleTrusts(t *testing.T) {
+	api, server := newFakeAPI(t)
+	resource.UnitTest(t, resource.TestCase{
+		ProtoV6ProviderFactories: factories,
+		Steps: []resource.TestStep{{
+			Config: providerBlock(server.URL, api.workspaceID) + `
+data "subako_workload_identity" "this" {}
+`,
+			ConfigStateChecks: []statecheck.StateCheck{
+				statecheck.ExpectKnownValue("data.subako_workload_identity.this", tfjsonpath.New("issuer"),
+					knownvalue.StringExact("https://oidc.subako.test")),
+				statecheck.ExpectKnownValue("data.subako_workload_identity.this", tfjsonpath.New("subject"),
+					knownvalue.StringExact("workspace:"+api.workspaceID)),
+				statecheck.ExpectKnownValue("data.subako_workload_identity.this",
+					tfjsonpath.New("aws").AtMapKey("audience"), knownvalue.StringExact("sts.amazonaws.com")),
+				statecheck.ExpectKnownValue("data.subako_workload_identity.this",
+					tfjsonpath.New("aws").AtMapKey("issuer_key"), knownvalue.StringExact("oidc.subako.test")),
+			},
+		}},
+	})
+}
+
 // agentGrantsHCL is an agent carrying the grant lines given: none at all, or
 // lists spelled empty.
 func agentGrantsHCL(grants string) string {

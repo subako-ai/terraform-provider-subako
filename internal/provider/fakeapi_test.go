@@ -44,6 +44,9 @@ type fakeAPI struct {
 	apiKeys map[string]string
 	// keyRotations counts the updates that carried a key, by provider id.
 	keyRotations map[string]int
+	// authChanges counts the updates that carried a federated auth, by
+	// provider id.
+	authChanges map[string]int
 	// refuseProviderUpdates makes every model provider update answer 500,
 	// for a test that needs one to fail.
 	refuseProviderUpdates bool
@@ -94,6 +97,7 @@ func newFakeAPI(t *testing.T) (*fakeAPI, *httptest.Server) {
 		providers:    map[string]*fakeProvider{},
 		apiKeys:      map[string]string{},
 		keyRotations: map[string]int{},
+		authChanges:  map[string]int{},
 		secrets:      map[string]map[string]any{},
 	}
 	api.providers[platformProviderID] = &fakeProvider{Body: map[string]any{
@@ -167,6 +171,7 @@ var routes = []route{
 	on("GET", "/v1/model-providers/"+seg, (*fakeAPI).getProvider),
 	on("PATCH", "/v1/model-providers/"+seg, (*fakeAPI).updateProvider),
 	on("DELETE", "/v1/model-providers/"+seg, (*fakeAPI).deleteProvider),
+	on("GET", "/v1/workload-identity", (*fakeAPI).getWorkloadIdentity),
 }
 
 func errBody(code, message string) map[string]any {
@@ -960,12 +965,20 @@ func (a *fakeAPI) createProvider(r *http.Request, _ []string) (int, any) {
 		return 400, errBody("invalid_request", "Kikuvi-Workspace header is required")
 	}
 	body := decode(r)
+	key, keyed := body["api_key"].(string)
+	auth, federated := body["auth"].(map[string]any)
+	if keyed == federated {
+		return 400, errBody("invalid_request", "Invalid model provider: send api_key or auth, not both")
+	}
 	providerID := newID()
-	a.apiKeys[providerID], _ = body["api_key"].(string)
+	if keyed {
+		a.apiKeys[providerID] = key
+		auth = map[string]any{"type": "api_key"}
+	}
 	a.providers[providerID] = &fakeProvider{Body: map[string]any{
 		"type": "byok", "id": providerID, "format": body["format"], "workspace_id": a.workspaceID,
 		"display_name": body["display_name"], "description": body["description"],
-		"created_at": "2026-01-01T00:00:00Z",
+		"auth": auth, "created_at": "2026-01-01T00:00:00Z",
 	}}
 	return 201, a.providers[providerID].Body
 }
@@ -1010,17 +1023,44 @@ func (a *fakeAPI) updateProvider(r *http.Request, args []string) (int, any) {
 		return 500, map[string]any{"error": map[string]any{"code": "internal", "message": "refused"}}
 	}
 	body := decode(r)
-	if key, sent := body["api_key"].(string); sent {
+	key, keyed := body["api_key"].(string)
+	auth, federated := body["auth"].(map[string]any)
+	if keyed && federated {
+		return 400, errBody("invalid_request", "Invalid model provider: send api_key or auth, not both")
+	}
+	if keyed {
 		a.apiKeys[args[0]] = key
 		a.keyRotations[args[0]]++
+		p.Body["auth"] = map[string]any{"type": "api_key"}
+	}
+	if federated {
+		delete(a.apiKeys, args[0])
+		a.authChanges[args[0]]++
+		p.Body["auth"] = auth
 	}
 	for k, v := range body {
-		if v == nil || k == "api_key" || k == "base_url" {
+		if v == nil || k == "api_key" || k == "auth" || k == "base_url" {
 			continue
 		}
 		p.Body[k] = v
 	}
 	return 200, p.Body
+}
+
+// setProviderAuth changes how a provider authenticates from outside
+// Terraform, as an edit in the console would.
+func (a *fakeAPI) setProviderAuth(id string, auth map[string]any) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.providers[id].Body["auth"] = auth
+}
+
+func (a *fakeAPI) getWorkloadIdentity(_ *http.Request, _ []string) (int, any) {
+	return 200, map[string]any{
+		"issuer":  "https://oidc.subako.test",
+		"subject": "workspace:" + a.workspaceID,
+		"aws":     map[string]any{"audience": "sts.amazonaws.com"},
+	}
 }
 
 // seedProvider puts a workspace model provider on the server that no
@@ -1032,7 +1072,8 @@ func (a *fakeAPI) seedProvider(format, displayName, key string) string {
 	a.apiKeys[providerID] = key
 	a.providers[providerID] = &fakeProvider{Body: map[string]any{
 		"type": "byok", "id": providerID, "format": format, "workspace_id": a.workspaceID,
-		"display_name": displayName, "description": "", "created_at": "2026-01-01T00:00:00Z",
+		"display_name": displayName, "description": "", "auth": map[string]any{"type": "api_key"},
+		"created_at": "2026-01-01T00:00:00Z",
 	}}
 	return providerID
 }

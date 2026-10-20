@@ -651,6 +651,30 @@ type ModelProvider struct {
 	Description string          `json:"description"`
 	WorkspaceID *string         `json:"workspace_id"`
 	Models      []PlatformModel `json:"models"`
+	// Auth is how a workspace's own provider authenticates. Absent on a
+	// platform provider.
+	Auth *ModelProviderAuth `json:"auth"`
+}
+
+// The arms of `ModelProviderAuthInput` and `ModelProviderAuthBody`.
+const (
+	AuthAPIKey         = "api_key"
+	AuthAWSWebIdentity = "aws_web_identity"
+)
+
+// ModelProviderAuth is `ModelProviderAuthBody` as read back, and the
+// `aws_web_identity` arm of `ModelProviderAuthInput` as sent: a key never
+// travels in it, so the `api_key` arm reads back as its type alone.
+type ModelProviderAuth struct {
+	Type    string `json:"type"`
+	RoleARN string `json:"role_arn,omitempty"`
+	Region  string `json:"region,omitempty"`
+}
+
+// AWSWebIdentity is the auth that assumes roleARN in the workspace's own AWS
+// account, its signatures scoped to region.
+func AWSWebIdentity(roleARN, region string) *ModelProviderAuth {
+	return &ModelProviderAuth{Type: AuthAWSWebIdentity, RoleARN: roleARN, Region: region}
 }
 
 // PlatformModel is `PlatformModelBody`.
@@ -660,22 +684,26 @@ type PlatformModel struct {
 	Description string `json:"description"`
 }
 
-// NewModelProvider is `CreateWorkspaceModelProviderBody`.
+// NewModelProvider is `CreateWorkspaceModelProviderBody`. It names its
+// credential one way: an APIKey, or an Auth that holds no secret.
 type NewModelProvider struct {
-	Format      string `json:"format"`
-	DisplayName string `json:"display_name"`
-	Description string `json:"description"`
-	BaseURL     string `json:"base_url"`
-	APIKey      string `json:"api_key"`
+	Format      string             `json:"format"`
+	DisplayName string             `json:"display_name"`
+	Description string             `json:"description"`
+	BaseURL     string             `json:"base_url"`
+	APIKey      string             `json:"api_key,omitempty"`
+	Auth        *ModelProviderAuth `json:"auth,omitempty"`
 }
 
-// ModelProviderUpdate is `UpdateModelProviderBody`. An absent APIKey leaves
-// the stored key as it stands; one sent replaces it.
+// ModelProviderUpdate is `UpdateModelProviderBody`. An absent APIKey and Auth
+// leave the stored credential as it stands; either one sent replaces it
+// whole.
 type ModelProviderUpdate struct {
-	DisplayName string  `json:"display_name"`
-	Description string  `json:"description"`
-	BaseURL     string  `json:"base_url"`
-	APIKey      *string `json:"api_key,omitempty"`
+	DisplayName string             `json:"display_name"`
+	Description string             `json:"description"`
+	BaseURL     string             `json:"base_url"`
+	APIKey      *string            `json:"api_key,omitempty"`
+	Auth        *ModelProviderAuth `json:"auth,omitempty"`
 }
 
 func modelProviderPath(id string) string {
@@ -712,4 +740,20 @@ func (c *Client) DeleteModelProvider(ctx context.Context, id string) error {
 
 func (c *Client) ListModelProviders(ctx context.Context) ([]ModelProvider, error) {
 	return listAll[ModelProvider](ctx, c, "/v1/model-providers")
+}
+
+// WorkloadIdentity is `WorkloadIdentityBody`: what a cloud account registers
+// and trusts so that the workspace's providers authenticate as the workspace.
+type WorkloadIdentity struct {
+	Issuer  string `json:"issuer"`
+	Subject string `json:"subject"`
+	AWS     struct {
+		Audience string `json:"audience"`
+	} `json:"aws"`
+}
+
+func (c *Client) GetWorkloadIdentity(ctx context.Context) (*WorkloadIdentity, error) {
+	var out WorkloadIdentity
+	err := c.do(ctx, request{method: http.MethodGet, path: "/v1/workload-identity"}, &out)
+	return &out, err
 }
