@@ -182,16 +182,19 @@ func newWorkloadIdentityDataSource() datasource.DataSource {
 	return &workloadIdentityDataSource{}
 }
 
-// workloadIdentityDataSource reads what a cloud account registers and trusts
-// so that the workspace's model providers authenticate as the workspace.
+// workloadIdentityDataSource reads what an AWS account, an Anthropic
+// organization, or an OpenAI organization trusts for a model provider to
+// authenticate as the provider's workspace.
 type workloadIdentityDataSource struct {
 	client *client.Client
 }
 
 type workloadIdentityModel struct {
-	Issuer  types.String             `tfsdk:"issuer"`
-	Subject types.String             `tfsdk:"subject"`
-	AWS     awsWorkloadIdentityModel `tfsdk:"aws"`
+	Issuer    types.String             `tfsdk:"issuer"`
+	Subject   types.String             `tfsdk:"subject"`
+	AWS       awsWorkloadIdentityModel `tfsdk:"aws"`
+	Anthropic identityAudienceModel    `tfsdk:"anthropic"`
+	OpenAI    identityAudienceModel    `tfsdk:"openai"`
 }
 
 type awsWorkloadIdentityModel struct {
@@ -199,25 +202,41 @@ type awsWorkloadIdentityModel struct {
 	IssuerKey types.String `tfsdk:"issuer_key"`
 }
 
+type identityAudienceModel struct {
+	Audience types.String `tfsdk:"audience"`
+}
+
 func (d *workloadIdentityDataSource) Metadata(_ context.Context, req datasource.MetadataRequest, resp *datasource.MetadataResponse) {
 	resp.TypeName = req.ProviderTypeName + "_workload_identity"
 }
 
+func audienceAttribute(description string) schema.SingleNestedAttribute {
+	return schema.SingleNestedAttribute{
+		Computed:    true,
+		Description: description,
+		Attributes: map[string]schema.Attribute{
+			"audience": schema.StringAttribute{Computed: true},
+		},
+	}
+}
+
 func (d *workloadIdentityDataSource) Schema(_ context.Context, _ datasource.SchemaRequest, resp *datasource.SchemaResponse) {
 	resp.Schema = schema.Schema{
-		Description: "The workspace as an OpenID Connect subject: what a cloud account registers " +
-			"and trusts so that a `subako_model_provider` with `aws_web_identity` authenticates " +
-			"as the workspace, with no secret handed over.",
+		Description: "What to register and trust in an AWS account, an Anthropic organization, or an " +
+			"OpenAI organization for a `subako_model_provider` to authenticate as the provider's " +
+			"workspace, with no key handed over. Not every deployment issues workload identity.",
 		Attributes: map[string]schema.Attribute{
 			"issuer": schema.StringAttribute{
 				Computed: true,
-				Description: "The issuer every workspace token names. Register it as an identity " +
-					"provider in the cloud account.",
+				Description: "The OpenID Connect issuer, whose discovery document is at " +
+					"`{issuer}/.well-known/openid-configuration`. Register it as an identity " +
+					"provider in AWS IAM or OpenAI, or as a federation issuer in Anthropic.",
 			},
 			"subject": schema.StringAttribute{
 				Computed: true,
-				Description: "The `sub` of this workspace's tokens, and of no other workspace's: " +
-					"the value a role's trust policy pins.",
+				Description: "This workspace's `sub`, and no other workspace's: what a role's trust " +
+					"policy, a federation rule's `subject_prefix`, or an OpenAI mapping's `sub` pins, " +
+					"whole.",
 			},
 			"aws": schema.SingleNestedAttribute{
 				Computed: true,
@@ -236,6 +255,8 @@ func (d *workloadIdentityDataSource) Schema(_ context.Context, _ datasource.Sche
 					},
 				},
 			},
+			"anthropic": audienceAttribute("The `audience` a federation rule's match checks."),
+			"openai":    audienceAttribute("The audience to give an OpenAI workload identity provider."),
 		},
 	}
 }
@@ -257,5 +278,7 @@ func (d *workloadIdentityDataSource) Read(ctx context.Context, _ datasource.Read
 			Audience:  types.StringValue(identity.AWS.Audience),
 			IssuerKey: types.StringValue(strings.TrimPrefix(identity.Issuer, "https://")),
 		},
+		Anthropic: identityAudienceModel{Audience: types.StringValue(identity.Anthropic.Audience)},
+		OpenAI:    identityAudienceModel{Audience: types.StringValue(identity.OpenAI.Audience)},
 	})...)
 }
