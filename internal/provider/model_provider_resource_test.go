@@ -3,6 +3,7 @@ package provider
 import (
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"regexp"
 	"testing"
 
@@ -51,6 +52,19 @@ func heldAuth(api *fakeAPI, want string) resource.TestCheckFunc {
 		}
 		if string(got) != want {
 			return fmt.Errorf("provider %s holds auth %s, want %s", id, got, want)
+		}
+		return nil
+	}
+}
+
+// providerHoldsNoKey pins that the server holds no key for the provider.
+func providerHoldsNoKey(api *fakeAPI) resource.TestCheckFunc {
+	return func(s *terraform.State) error {
+		id := s.RootModule().Resources[modelProviderAddress].Primary.ID
+		api.mu.Lock()
+		defer api.mu.Unlock()
+		if key, held := api.apiKeys[id]; held {
+			return fmt.Errorf("provider %s holds key %q", id, key)
 		}
 		return nil
 	}
@@ -122,7 +136,7 @@ func TestAFederatedModelProviderReadsItsIdentityBack(t *testing.T) {
 							statecheck.ExpectKnownValue(modelProviderAddress, tfjsonpath.New("auth").AtMapKey("api_key"), knownvalue.Null()),
 							statecheck.ExpectKnownValue(modelProviderAddress, tfjsonpath.New("api_key_wo_version"), knownvalue.Null()),
 						),
-						Check: heldAuth(api, c.held),
+						Check: resource.ComposeAggregateTestCheckFunc(heldAuth(api, c.held), providerHoldsNoKey(api)),
 					},
 					{Config: config, PlanOnly: true},
 					{
@@ -167,6 +181,7 @@ func TestAModelProviderSwitchesAuthInPlace(t *testing.T) {
 					sameProviderAs(&firstID),
 					heldAuth(api, `{"region":"us-east-1","role_arn":"`+roleARN+`","type":"aws_web_identity"}`),
 					authUpdates(api, 1),
+					providerHoldsNoKey(api),
 				),
 			},
 			{
@@ -240,6 +255,17 @@ func TestAModelProviderAuthIsCheckedBeforeAnyCall(t *testing.T) {
 		err          *regexp.Regexp
 	}{
 		{
+			name: "no way at all",
+			config: `
+resource "subako_model_provider" "p" {
+  format       = "anthropic"
+  display_name = "Mine"
+  base_url     = "https://api.anthropic.com"
+}
+`,
+			err: regexp.MustCompile(`"auth" is required`),
+		},
+		{
 			name: "a key without its version",
 			config: federatedProviderHCL("anthropic", anthropicAPIURL, "Mine",
 				`{ api_key = { api_key_wo = "sk-1" } }`),
@@ -295,27 +321,43 @@ func TestAModelProviderAuthIsCheckedBeforeAnyCall(t *testing.T) {
 	}
 }
 
-// A version 0 state held its key's version at the top level; it now sits
-// beside `auth.api_key`, which the upgrade selects.
-func TestAVersion0ModelProviderStateHoldsAnAPIKeyAuth(t *testing.T) {
-	const v0 = `{"id":"p","format":"anthropic","display_name":"Mine","description":"",` +
-		`"base_url":"https://api.anthropic.com","api_key_wo":null,"api_key_wo_version":3}`
-	upgraded, err := upgradeModelProviderJSONV0([]byte(v0))
-	if err != nil {
-		t.Fatal(err)
+// A version 0 state held its credential at the top level: a key's version
+// beside the write-only key, or a role. Either now sits under `auth`.
+func TestAVersion0ModelProviderStateMovesItsCredentialUnderAuth(t *testing.T) {
+	const head = `"id":"p","format":"anthropic","display_name":"Mine","description":"","base_url":"https://api.anthropic.com",`
+	cases := []struct{ name, v0, want string }{
+		{
+			name: "a key",
+			v0:   `{` + head + `"api_key_wo":null,"api_key_wo_version":3}`,
+			want: `{` + head + `"api_key_wo_version":3,"auth":{"api_key":{"api_key_wo":null},"aws_web_identity":null,
+				"anthropic_workload_identity":null,"openai_workload_identity":null}}`,
+		},
+		{
+			name: "a role",
+			v0: `{` + head + `"api_key_wo":null,"api_key_wo_version":null,` +
+				`"aws_web_identity":{"role_arn":"` + roleARN + `","region":"us-east-1"}}`,
+			want: `{` + head + `"api_key_wo_version":null,"auth":{"api_key":null,
+				"aws_web_identity":{"role_arn":"` + roleARN + `","region":"us-east-1"},
+				"anthropic_workload_identity":null,"openai_workload_identity":null}}`,
+		},
 	}
-	var got, want map[string]any
-	if err := json.Unmarshal(upgraded, &got); err != nil {
-		t.Fatal(err)
-	}
-	if err := json.Unmarshal([]byte(`{"id":"p","format":"anthropic","display_name":"Mine","description":"",
-		"base_url":"https://api.anthropic.com","api_key_wo_version":3,
-		"auth":{"api_key":{"api_key_wo":null},"aws_web_identity":null,
-			"anthropic_workload_identity":null,"openai_workload_identity":null}}`), &want); err != nil {
-		t.Fatal(err)
-	}
-	if fmt.Sprint(got) != fmt.Sprint(want) {
-		t.Errorf("upgraded to %s", upgraded)
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			upgraded, err := upgradeModelProviderJSONV0([]byte(c.v0))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got, want map[string]any
+			if err := json.Unmarshal(upgraded, &got); err != nil {
+				t.Fatal(err)
+			}
+			if err := json.Unmarshal([]byte(c.want), &want); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(got, want) {
+				t.Errorf("upgraded to %s", upgraded)
+			}
+		})
 	}
 }
 
@@ -335,6 +377,7 @@ func TestTheWorkloadIdentityDataSourceReadsWhatToTrust(t *testing.T) {
 				statecheck.ExpectKnownValue(address, tfjsonpath.New("issuer"), knownvalue.StringExact("https://oidc.subako.test")),
 				statecheck.ExpectKnownValue(address, tfjsonpath.New("subject"), knownvalue.StringExact("workspace:"+api.workspaceID)),
 				statecheck.ExpectKnownValue(address, tfjsonpath.New("aws").AtMapKey("audience"), knownvalue.StringExact("sts.amazonaws.com")),
+				statecheck.ExpectKnownValue(address, tfjsonpath.New("aws").AtMapKey("issuer_key"), knownvalue.StringExact("oidc.subako.test")),
 				statecheck.ExpectKnownValue(address, tfjsonpath.New("anthropic").AtMapKey("audience"),
 					knownvalue.StringExact("https://api.anthropic.com")),
 				statecheck.ExpectKnownValue(address, tfjsonpath.New("openai").AtMapKey("audience"),

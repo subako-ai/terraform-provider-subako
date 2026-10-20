@@ -978,21 +978,22 @@ func (a *fakeAPI) createProvider(r *http.Request, _ []string) (int, any) {
 }
 
 // holdAuth keeps an auth sent for a provider, answering it as
-// `ModelProviderAuthBody` does: a key never comes back, and an Anthropic
-// identity's absent workspace is null.
+// `ModelProviderAuthBody` does: a key never comes back, an auth that is no
+// key leaves none held, and an Anthropic identity's absent workspace is null.
 func (a *fakeAPI) holdAuth(providerID string, sent map[string]any) map[string]any {
 	held := map[string]any{}
 	for k, v := range sent {
 		held[k] = v
 	}
-	switch held["type"] {
-	case "api_key":
+	if held["type"] == "api_key" {
 		a.apiKeys[providerID], _ = held["api_key"].(string)
 		delete(held, "api_key")
-	case "anthropic_workload_identity":
-		if _, named := held["workspace_id"]; !named {
-			held["workspace_id"] = nil
-		}
+		return held
+	}
+	// Any other auth replaces the key with a credential that holds no secret.
+	delete(a.apiKeys, providerID)
+	if _, named := held["workspace_id"]; !named && held["type"] == "anthropic_workload_identity" {
+		held["workspace_id"] = nil
 	}
 	return held
 }

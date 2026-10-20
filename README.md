@@ -239,10 +239,6 @@ the same configuration:
 ```hcl
 data "subako_workload_identity" "this" {}
 
-locals {
-  issuer_host = trimprefix(data.subako_workload_identity.this.issuer, "https://")
-}
-
 resource "aws_iam_openid_connect_provider" "subako" {
   url            = data.subako_workload_identity.this.issuer
   client_id_list = [data.subako_workload_identity.this.aws.audience]
@@ -257,13 +253,13 @@ data "aws_iam_policy_document" "trust_this_workspace" {
     }
     condition {
       test     = "StringEquals"
-      variable = "${local.issuer_host}:aud"
+      variable = "${data.subako_workload_identity.this.aws.issuer_key}:aud"
       values   = [data.subako_workload_identity.this.aws.audience]
     }
     # The whole subject, so the role trusts this workspace and no other.
     condition {
       test     = "StringEquals"
-      variable = "${local.issuer_host}:sub"
+      variable = "${data.subako_workload_identity.this.aws.issuer_key}:sub"
       values   = [data.subako_workload_identity.this.subject]
     }
   }
@@ -289,10 +285,11 @@ resource "subako_model_provider" "bedrock" {
 }
 ```
 
-IAM can take a few seconds to honour a role it has just created, so an apply
-that creates the role and the provider together may be refused once; applying
-again connects it. The role's permissions are needed only once agents call
-Bedrock, not to connect.
+The role also needs `bedrock:InvokeModel` and
+`bedrock:InvokeModelWithResponseStream` on the models it calls, though only
+once agents call Bedrock, not to connect. IAM can take a few seconds to honour
+a role it has just created, so an apply that creates the role and the provider
+together may be refused once; applying again connects it.
 
 An Anthropic federation rule or an OpenAI workload identity provider is set up
 in that organization's console, matching the same subject whole. The provider

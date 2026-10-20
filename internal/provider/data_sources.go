@@ -2,6 +2,7 @@ package provider
 
 import (
 	"context"
+	"strings"
 
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
 	"github.com/hashicorp/terraform-plugin-framework/datasource/schema"
@@ -189,11 +190,16 @@ type workloadIdentityDataSource struct {
 }
 
 type workloadIdentityModel struct {
-	Issuer    types.String          `tfsdk:"issuer"`
-	Subject   types.String          `tfsdk:"subject"`
-	AWS       identityAudienceModel `tfsdk:"aws"`
-	Anthropic identityAudienceModel `tfsdk:"anthropic"`
-	OpenAI    identityAudienceModel `tfsdk:"openai"`
+	Issuer    types.String             `tfsdk:"issuer"`
+	Subject   types.String             `tfsdk:"subject"`
+	AWS       awsWorkloadIdentityModel `tfsdk:"aws"`
+	Anthropic identityAudienceModel    `tfsdk:"anthropic"`
+	OpenAI    identityAudienceModel    `tfsdk:"openai"`
+}
+
+type awsWorkloadIdentityModel struct {
+	Audience  types.String `tfsdk:"audience"`
+	IssuerKey types.String `tfsdk:"issuer_key"`
 }
 
 type identityAudienceModel struct {
@@ -232,7 +238,23 @@ func (d *workloadIdentityDataSource) Schema(_ context.Context, _ datasource.Sche
 					"policy, a federation rule's `subject_prefix`, or an OpenAI mapping's `sub` pins, " +
 					"whole.",
 			},
-			"aws":       audienceAttribute("The audience to register the issuer under in IAM, and the `aud` a role's trust policy checks."),
+			"aws": schema.SingleNestedAttribute{
+				Computed: true,
+				Attributes: map[string]schema.Attribute{
+					"audience": schema.StringAttribute{
+						Computed: true,
+						Description: "The client id to register the issuer under in IAM " +
+							"(`aws_iam_openid_connect_provider.client_id_list`), and the `aud` a " +
+							"role's trust policy checks.",
+					},
+					"issuer_key": schema.StringAttribute{
+						Computed: true,
+						Description: "The issuer without its scheme, which IAM prefixes its condition " +
+							"keys with: a trust policy pins `<issuer_key>:sub` and checks " +
+							"`<issuer_key>:aud`.",
+					},
+				},
+			},
 			"anthropic": audienceAttribute("The `audience` a federation rule's match checks."),
 			"openai":    audienceAttribute("The audience to give an OpenAI workload identity provider."),
 		},
@@ -250,9 +272,12 @@ func (d *workloadIdentityDataSource) Read(ctx context.Context, _ datasource.Read
 		return
 	}
 	resp.Diagnostics.Append(resp.State.Set(ctx, &workloadIdentityModel{
-		Issuer:    types.StringValue(identity.Issuer),
-		Subject:   types.StringValue(identity.Subject),
-		AWS:       identityAudienceModel{Audience: types.StringValue(identity.AWS.Audience)},
+		Issuer:  types.StringValue(identity.Issuer),
+		Subject: types.StringValue(identity.Subject),
+		AWS: awsWorkloadIdentityModel{
+			Audience:  types.StringValue(identity.AWS.Audience),
+			IssuerKey: types.StringValue(strings.TrimPrefix(identity.Issuer, "https://")),
+		},
 		Anthropic: identityAudienceModel{Audience: types.StringValue(identity.Anthropic.Audience)},
 		OpenAI:    identityAudienceModel{Audience: types.StringValue(identity.OpenAI.Audience)},
 	})...)

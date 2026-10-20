@@ -531,8 +531,8 @@ func (r *modelProviderResource) ImportState(ctx context.Context, req resource.Im
 	resource.ImportStatePassthroughID(ctx, path.Root("id"), req, resp)
 }
 
-// UpgradeState moves a version 0 state, whose key sat at the top level,
-// under `auth.api_key`.
+// UpgradeState moves a version 0 state, whose credential sat at the top
+// level -- `api_key_wo`, or `aws_web_identity` beside it -- under `auth`.
 func (r *modelProviderResource) UpgradeState(context.Context) map[int64]resource.StateUpgrader {
 	return map[int64]resource.StateUpgrader{
 		0: {StateUpgrader: upgradeModelProviderStateV0},
@@ -555,12 +555,20 @@ func upgradeModelProviderJSONV0(raw []byte) ([]byte, error) {
 	if err := decoder.Decode(&state); err != nil {
 		return nil, fmt.Errorf("decode version 0 state: %w", err)
 	}
-	state["auth"] = map[string]any{
-		client.AuthAPIKey:                    map[string]any{"api_key_wo": nil},
+	auth := map[string]any{
+		client.AuthAPIKey:                    nil,
 		client.AuthAWSWebIdentity:            nil,
 		client.AuthAnthropicWorkloadIdentity: nil,
 		client.AuthOpenAIWorkloadIdentity:    nil,
 	}
+	switch role := state[client.AuthAWSWebIdentity]; role {
+	case nil:
+		auth[client.AuthAPIKey] = map[string]any{"api_key_wo": nil}
+	default:
+		auth[client.AuthAWSWebIdentity] = role
+	}
+	state["auth"] = auth
 	delete(state, "api_key_wo")
+	delete(state, client.AuthAWSWebIdentity)
 	return json.Marshal(state)
 }
