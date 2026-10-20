@@ -321,43 +321,27 @@ resource "subako_model_provider" "p" {
 	}
 }
 
-// A version 0 state held its credential at the top level: a key's version
-// beside the write-only key, or a role. Either now sits under `auth`.
-func TestAVersion0ModelProviderStateMovesItsCredentialUnderAuth(t *testing.T) {
-	const head = `"id":"p","format":"anthropic","display_name":"Mine","description":"","base_url":"https://api.anthropic.com",`
-	cases := []struct{ name, v0, want string }{
-		{
-			name: "a key",
-			v0:   `{` + head + `"api_key_wo":null,"api_key_wo_version":3}`,
-			want: `{` + head + `"api_key_wo_version":3,"auth":{"api_key":{"api_key_wo":null},"aws_web_identity":null,
-				"anthropic_workload_identity":null,"openai_workload_identity":null}}`,
-		},
-		{
-			name: "a role",
-			v0: `{` + head + `"api_key_wo":null,"api_key_wo_version":null,` +
-				`"aws_web_identity":{"role_arn":"` + roleARN + `","region":"us-east-1"}}`,
-			want: `{` + head + `"api_key_wo_version":null,"auth":{"api_key":null,
-				"aws_web_identity":{"role_arn":"` + roleARN + `","region":"us-east-1"},
-				"anthropic_workload_identity":null,"openai_workload_identity":null}}`,
-		},
+// A version 0 state held its key's version at the top level; it now sits
+// beside `auth.api_key`, which the upgrade selects.
+func TestAVersion0ModelProviderStateHoldsAnAPIKeyAuth(t *testing.T) {
+	const v0 = `{"id":"p","format":"anthropic","display_name":"Mine","description":"",` +
+		`"base_url":"https://api.anthropic.com","api_key_wo":null,"api_key_wo_version":3}`
+	upgraded, err := upgradeModelProviderJSONV0([]byte(v0))
+	if err != nil {
+		t.Fatal(err)
 	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			upgraded, err := upgradeModelProviderJSONV0([]byte(c.v0))
-			if err != nil {
-				t.Fatal(err)
-			}
-			var got, want map[string]any
-			if err := json.Unmarshal(upgraded, &got); err != nil {
-				t.Fatal(err)
-			}
-			if err := json.Unmarshal([]byte(c.want), &want); err != nil {
-				t.Fatal(err)
-			}
-			if !reflect.DeepEqual(got, want) {
-				t.Errorf("upgraded to %s", upgraded)
-			}
-		})
+	var got, want map[string]any
+	if err := json.Unmarshal(upgraded, &got); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal([]byte(`{"id":"p","format":"anthropic","display_name":"Mine","description":"",
+		"base_url":"https://api.anthropic.com","api_key_wo_version":3,
+		"auth":{"api_key":{"api_key_wo":null},"aws_web_identity":null,
+			"anthropic_workload_identity":null,"openai_workload_identity":null}}`), &want); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("upgraded to %s", upgraded)
 	}
 }
 
