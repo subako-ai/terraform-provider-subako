@@ -97,12 +97,16 @@ type AgentVersion struct {
 	Config          json.RawMessage `json:"config"`
 }
 
-func (c *Client) PublishAgentVersion(ctx context.Context, agentID string, config AgentConfig) (*AgentVersion, error) {
-	body, err := config.publishBody()
+// PublishAgentVersion publishes config as the agent's next version. carried
+// is sent beside it: the fields of the latest version's config this provider
+// has no type for, which a publish would otherwise set back to their
+// defaults.
+func (c *Client) PublishAgentVersion(ctx context.Context, agentID string, config AgentConfig, carried map[string]json.RawMessage) (*AgentVersion, error) {
+	body, err := config.publishJSON(carried)
 	if err != nil {
 		return nil, err
 	}
-	req, err := jsonRequest(http.MethodPost, agentPath(agentID)+"/versions", body)
+	req, err := jsonRequest(http.MethodPost, agentPath(agentID)+"/versions", json.RawMessage(body))
 	if err != nil {
 		return nil, err
 	}

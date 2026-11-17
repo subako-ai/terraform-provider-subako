@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"reflect"
 	"slices"
 )
@@ -47,6 +48,33 @@ type publishBody struct {
 	configBody
 }
 
+// publishJSON is the publish body with carried beside the config's own
+// fields: what the latest version holds that this provider has no type for,
+// sent back as it was read. A field the config does type is the config's.
+func (c AgentConfig) publishJSON(carried map[string]json.RawMessage) ([]byte, error) {
+	body, err := c.publishBody()
+	if err != nil {
+		return nil, err
+	}
+	encoded, err := json.Marshal(body)
+	if err != nil {
+		return nil, fmt.Errorf("encode config: %w", err)
+	}
+	if len(carried) == 0 {
+		return encoded, nil
+	}
+	fields := map[string]json.RawMessage{}
+	if err := json.Unmarshal(encoded, &fields); err != nil {
+		return nil, fmt.Errorf("encode config: %w", err)
+	}
+	for name, value := range carried {
+		if _, typed := fields[name]; !typed {
+			fields[name] = value
+		}
+	}
+	return json.Marshal(fields)
+}
+
 func (c AgentConfig) publishBody() (publishBody, error) {
 	model, err := json.Marshal(c.Model)
 	if err != nil {
@@ -68,12 +96,117 @@ func (c AgentConfig) publishBody() (publishBody, error) {
 	}, nil
 }
 
-// AgentConfig decodes the config the version was published with. A field
-// this provider has no type for is refused rather than dropped: the next
-// publish would otherwise remove it without the plan saying so.
-func (v *AgentVersion) AgentConfig() (AgentConfig, error) {
+// Unmanaged is what a version's config holds that this provider has no type
+// for. Reading it is no error; what a publish does about it is the
+// publisher's to decide, since a publish replaces the whole config.
+type Unmanaged struct {
+	// Fields are the config's own fields, by name, as the version spells
+	// them. A publish that sends them along leaves each as it was.
+	Fields map[string]json.RawMessage
+	// Nested are the paths of the fields inside one this provider does type.
+	// It rebuilds that one from its own type, so a publish would drop them.
+	Nested []string
+}
+
+// Names are the unmanaged fields' paths, sorted.
+func (u Unmanaged) Names() []string {
+	names := slices.Collect(maps.Keys(u.Fields))
+	names = append(names, u.Nested...)
+	slices.Sort(names)
+	return names
+}
+
+// AgentConfig decodes the config the version was published with, and names
+// what it holds that this provider has no type for. A value no type spells
+// -- a model format, a widget kind -- is an error: nothing could hold it.
+func (v *AgentVersion) AgentConfig() (AgentConfig, Unmanaged, error) {
+	config, err := v.typedConfig()
+	if err != nil {
+		return AgentConfig{}, Unmanaged{}, err
+	}
+	unmanaged, err := v.unmanaged(config)
+	if err != nil {
+		return AgentConfig{}, Unmanaged{}, fmt.Errorf("decode agent version %d config: %w", v.Version, err)
+	}
+	return config, unmanaged, nil
+}
+
+// unmanaged is what the version's config holds that config, written back
+// out, does not: a version answers every field, so a field the written
+// config lacks is one no type here names.
+func (v *AgentVersion) unmanaged(config AgentConfig) (Unmanaged, error) {
+	body, err := config.publishBody()
+	if err != nil {
+		return Unmanaged{}, err
+	}
+	written, err := json.Marshal(body.configBody)
+	if err != nil {
+		return Unmanaged{}, err
+	}
+	var read, typed map[string]any
+	if err := json.Unmarshal(v.Config, &read); err != nil {
+		return Unmanaged{}, err
+	}
+	if err := json.Unmarshal(written, &typed); err != nil {
+		return Unmanaged{}, err
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(v.Config, &raw); err != nil {
+		return Unmanaged{}, err
+	}
+	unmanaged := Unmanaged{}
+	for _, name := range slices.Sorted(maps.Keys(read)) {
+		known, ok := typed[name]
+		if !ok {
+			if unmanaged.Fields == nil {
+				unmanaged.Fields = map[string]json.RawMessage{}
+			}
+			unmanaged.Fields[name] = raw[name]
+			continue
+		}
+		unmanaged.Nested = append(unmanaged.Nested, untyped(name, read[name], known)...)
+	}
+	return unmanaged, nil
+}
+
+// untyped lists the paths under at of the object fields read holds and typed
+// does not. Lists are walked element by element: writing a config back out
+// keeps their order.
+func untyped(at string, read, typed any) []string {
+	switch read := read.(type) {
+	case map[string]any:
+		typed, ok := typed.(map[string]any)
+		if !ok {
+			return nil
+		}
+		var paths []string
+		for _, name := range slices.Sorted(maps.Keys(read)) {
+			path := at + "." + name
+			known, ok := typed[name]
+			if !ok {
+				paths = append(paths, path)
+				continue
+			}
+			paths = append(paths, untyped(path, read[name], known)...)
+		}
+		return paths
+	case []any:
+		typed, ok := typed.([]any)
+		if !ok {
+			return nil
+		}
+		var paths []string
+		for i := range min(len(read), len(typed)) {
+			paths = append(paths, untyped(fmt.Sprintf("%s[%d]", at, i), read[i], typed[i])...)
+		}
+		return paths
+	}
+	return nil
+}
+
+func (v *AgentVersion) typedConfig() (AgentConfig, error) {
 	var body configBody
-	if err := strictUnmarshal(v.Config, &body); err != nil {
+	if err := json.Unmarshal(v.Config, &body); err != nil {
 		return AgentConfig{}, fmt.Errorf("decode agent version %d config: %w", v.Version, err)
 	}
 	model, err := decodeModel(body.Model)
@@ -162,13 +295,6 @@ func orEmpty[T any](list []T) []T {
 		return []T{}
 	}
 	return list
-}
-
-// strictUnmarshal decodes data into v, refusing a field v does not name.
-func strictUnmarshal(data []byte, v any) error {
-	decoder := json.NewDecoder(bytes.NewReader(data))
-	decoder.DisallowUnknownFields()
-	return decoder.Decode(v)
 }
 
 // tagOf reads the tag a variant carries under key, without the rest.
@@ -323,7 +449,7 @@ func decodeModel(data []byte) (ModelConfig, error) {
 	switch format {
 	case FormatAnthropic:
 		var body anthropicBody
-		if err := strictUnmarshal(data, &body); err != nil {
+		if err := json.Unmarshal(data, &body); err != nil {
 			return nil, err
 		}
 		if err := oneOf("image input", body.ImageInput, ImageInputs...); err != nil {
@@ -350,7 +476,7 @@ func decodeModel(data []byte) (ModelConfig, error) {
 		}, nil
 	case FormatOpenAIResponses:
 		var body openaiResponsesBody
-		if err := strictUnmarshal(data, &body); err != nil {
+		if err := json.Unmarshal(data, &body); err != nil {
 			return nil, err
 		}
 		if err := oneOf("image input", body.ImageInput, ImageInputs...); err != nil {
@@ -450,12 +576,12 @@ func decodeThinking(data []byte) (AnthropicThinking, error) {
 	}
 	if kind == ThinkingEnabled {
 		var body enabledThinkingBody
-		if err := strictUnmarshal(data, &body); err != nil {
+		if err := json.Unmarshal(data, &body); err != nil {
 			return nil, fmt.Errorf("thinking: %w", err)
 		}
 		return EnabledThinking{BudgetTokens: body.BudgetTokens}, nil
 	}
-	if err := strictUnmarshal(data, &typeTag{}); err != nil {
+	if err := json.Unmarshal(data, &typeTag{}); err != nil {
 		return nil, fmt.Errorf("thinking: %w", err)
 	}
 	switch kind {
@@ -534,7 +660,7 @@ func (g SkillGrant) MarshalJSON() ([]byte, error) {
 
 func (g *SkillGrant) UnmarshalJSON(data []byte) error {
 	var raw skillGrantJSON
-	if err := strictUnmarshal(data, &raw); err != nil {
+	if err := json.Unmarshal(data, &raw); err != nil {
 		return err
 	}
 	version, err := raw.Version.version()
@@ -593,7 +719,7 @@ func (g SandboxGrant) MarshalJSON() ([]byte, error) {
 
 func (g *SandboxGrant) UnmarshalJSON(data []byte) error {
 	var raw sandboxGrantJSON
-	if err := strictUnmarshal(data, &raw); err != nil {
+	if err := json.Unmarshal(data, &raw); err != nil {
 		return err
 	}
 	if err := oneOf("sandbox environment", raw.Environment.Type, "platform"); err != nil {
@@ -660,7 +786,7 @@ func (g FunctionGrant) MarshalJSON() ([]byte, error) {
 
 func (g *FunctionGrant) UnmarshalJSON(data []byte) error {
 	var raw functionGrantJSON
-	if err := strictUnmarshal(data, &raw); err != nil {
+	if err := json.Unmarshal(data, &raw); err != nil {
 		return err
 	}
 	source, err := decodeFunctionSource(raw.Source)
@@ -732,13 +858,13 @@ func decodeFunctionSource(data []byte) (FunctionSource, error) {
 	switch kind {
 	case "platform":
 		var body platformFunctionBody
-		if err := strictUnmarshal(data, &body); err != nil {
+		if err := json.Unmarshal(data, &body); err != nil {
 			return nil, fmt.Errorf("source: %w", err)
 		}
 		return PlatformFunction{Package: body.Package}, nil
 	case "workspace":
 		var body workspaceFunctionBody
-		if err := strictUnmarshal(data, &body); err != nil {
+		if err := json.Unmarshal(data, &body); err != nil {
 			return nil, fmt.Errorf("source: %w", err)
 		}
 		version, err := body.Version.version()
@@ -796,12 +922,12 @@ func decodeFunctionNetwork(data []byte) (FunctionNetwork, error) {
 	}
 	if kind == "allowlist" {
 		var body allowlistBody
-		if err := strictUnmarshal(data, &body); err != nil {
+		if err := json.Unmarshal(data, &body); err != nil {
 			return nil, fmt.Errorf("network: %w", err)
 		}
 		return AllowlistNetwork{Hosts: body.Hosts}, nil
 	}
-	if err := strictUnmarshal(data, &typeTag{}); err != nil {
+	if err := json.Unmarshal(data, &typeTag{}); err != nil {
 		return nil, fmt.Errorf("network: %w", err)
 	}
 	switch kind {
@@ -841,7 +967,7 @@ func (v VolumeConfig) MarshalJSON() ([]byte, error) {
 
 func (v *VolumeConfig) UnmarshalJSON(data []byte) error {
 	var raw volumeConfigJSON
-	if err := strictUnmarshal(data, &raw); err != nil {
+	if err := json.Unmarshal(data, &raw); err != nil {
 		return err
 	}
 	if err := oneOf("volume data", raw.Data.Type, VolumeData...); err != nil {
@@ -873,7 +999,7 @@ func (a Attachments) MarshalJSON() ([]byte, error) {
 
 func (a *Attachments) UnmarshalJSON(data []byte) error {
 	var raw typeTag
-	if err := strictUnmarshal(data, &raw); err != nil {
+	if err := json.Unmarshal(data, &raw); err != nil {
 		return err
 	}
 	if err := oneOf("attachments setting", raw.Type, AttachmentsSettings...); err != nil {
@@ -921,7 +1047,7 @@ func (b BuiltinGrants) MarshalJSON() ([]byte, error) {
 
 func (b *BuiltinGrants) UnmarshalJSON(data []byte) error {
 	var raw builtinGrantsJSON
-	if err := strictUnmarshal(data, &raw); err != nil {
+	if err := json.Unmarshal(data, &raw); err != nil {
 		return err
 	}
 	if err := oneOf("session display name setting", raw.SessionDisplayName.When, DisplayNameWhens...); err != nil {
@@ -954,7 +1080,7 @@ func (g AskUserGrant) MarshalJSON() ([]byte, error) {
 
 func (g *AskUserGrant) UnmarshalJSON(data []byte) error {
 	var raw askUserGrantJSON
-	if err := strictUnmarshal(data, &raw); err != nil {
+	if err := json.Unmarshal(data, &raw); err != nil {
 		return err
 	}
 	widgets := make([]Widget, len(raw.Widgets))
@@ -1031,7 +1157,7 @@ func decodeWidget(data []byte) (Widget, error) {
 	}
 	if kind == "custom" {
 		var body customWidgetBody
-		if err := strictUnmarshal(data, &body); err != nil {
+		if err := json.Unmarshal(data, &body); err != nil {
 			return nil, err
 		}
 		return canonicalWidget(CustomWidget{
@@ -1041,7 +1167,7 @@ func decodeWidget(data []byte) (Widget, error) {
 			Answer:      string(body.Answer),
 		}), nil
 	}
-	if err := strictUnmarshal(data, &typeTag{}); err != nil {
+	if err := json.Unmarshal(data, &typeTag{}); err != nil {
 		return nil, err
 	}
 	switch kind {

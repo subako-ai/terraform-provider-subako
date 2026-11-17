@@ -246,6 +246,77 @@ func grantSandboxElsewhere(api *fakeAPI) func() {
 	}
 }
 
+// editLatestConfig changes the config of each agent's newest version in
+// place, as a server that has since grown a setting would answer it.
+func editLatestConfig(api *fakeAPI, edit func(config map[string]any)) func() {
+	return func() {
+		api.mu.Lock()
+		defer api.mu.Unlock()
+		for _, agent := range api.agents {
+			edit(agent.Versions[len(agent.Versions)-1]["config"].(map[string]any))
+		}
+	}
+}
+
+// A setting the provider has no type for does not stop a read. One of the
+// config's own is sent back with the next publish as it was read; one inside
+// a setting the provider rebuilds cannot be, so that publish is refused
+// rather than made without it.
+func TestASettingTheProviderDoesNotManageIsKeptOrThePublishRefused(t *testing.T) {
+	api, server := newFakeAPI(t)
+	api.laterConfigFields = map[string]any{"memory": map[string]any{"type": "disabled"}}
+	head := providerBlock(server.URL, api.workspaceID)
+
+	resource.UnitTest(t, resource.TestCase{
+		TerraformVersionChecks:   versionChecks,
+		ProtoV6ProviderFactories: factories,
+		CheckDestroy:             checkEmpty(api),
+		Steps: []resource.TestStep{
+			{Config: head + minimalAgentHCL("be brief", "")},
+			{
+				PreConfig: editLatestConfig(api, func(config map[string]any) {
+					config["memory"] = map[string]any{"type": "enabled"}
+				}),
+				Config: head + minimalAgentHCL("be brief", ""),
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{plancheck.ExpectEmptyPlan()},
+				},
+				Check: checkVersionCount(api, 1),
+			},
+			{
+				Config: head + minimalAgentHCL("be thorough", ""),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					checkVersionCount(api, 2),
+					checkLatestConfig(api, "system_prompt", "be thorough"),
+					checkLatestConfig(api, "memory", map[string]any{"type": "enabled"}),
+				),
+			},
+			{
+				PreConfig: editLatestConfig(api, func(config map[string]any) {
+					config["volume"].(map[string]any)["scratch"] = map[string]any{"type": "enabled"}
+				}),
+				Config: head + minimalAgentHCL("be thorough", ""),
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{plancheck.ExpectEmptyPlan()},
+				},
+			},
+			{
+				Config:      head + minimalAgentHCL("be exact", ""),
+				ExpectError: regexp.MustCompile(`(?s)publishing would drop.*volume\.scratch`),
+			},
+			{
+				// The scratch root goes, as an upgraded provider's publish
+				// would have it, so the agent can be destroyed as it stands.
+				PreConfig: editLatestConfig(api, func(config map[string]any) {
+					delete(config["volume"].(map[string]any), "scratch")
+				}),
+				Config: head + minimalAgentHCL("be thorough", ""),
+				Check:  checkVersionCount(api, 2),
+			},
+		},
+	})
+}
+
 // Terraform owns the whole config, so a grant added elsewhere is undone by
 // the next apply -- unless the configuration leaves it to that other tool,
 // in which case a publish carries it along.
@@ -362,38 +433,31 @@ func TestEachThinkingVariantPublishesItsKind(t *testing.T) {
 	})
 }
 
-// A version holding a field this provider has no attribute for cannot be
-// planned against: the next publish would drop it without the plan showing.
-func TestAVersionHoldingAnUnknownFieldFailsThePlan(t *testing.T) {
+// A version holding a value this provider has no spelling for cannot be
+// planned against: no attribute could hold it.
+func TestAVersionHoldingAValueNoTypeSpellsFailsThePlan(t *testing.T) {
 	api, server := newFakeAPI(t)
 	config := providerBlock(server.URL, api.workspaceID) + minimalAgentHCL("be brief", "")
+	volumeData := func(kind string) func() {
+		return editLatestConfig(api, func(config map[string]any) {
+			config["volume"] = map[string]any{"data": map[string]any{"type": kind}}
+		})
+	}
 	resource.UnitTest(t, resource.TestCase{
 		TerraformVersionChecks:   versionChecks,
 		ProtoV6ProviderFactories: factories,
 		Steps: []resource.TestStep{
 			{Config: config},
 			{
-				PreConfig: func() {
-					api.mu.Lock()
-					defer api.mu.Unlock()
-					for _, agent := range api.agents {
-						agent.Versions[len(agent.Versions)-1]["config"].(map[string]any)["subagent"] = map[string]any{}
-					}
-				},
+				PreConfig:   volumeData("archived"),
 				Config:      config,
 				PlanOnly:    true,
-				ExpectError: regexp.MustCompile(`unknown field "subagent"`),
+				ExpectError: regexp.MustCompile(`unknown volume data "archived"`),
 			},
 			{
-				// Taken back out, so the agent can be destroyed.
-				PreConfig: func() {
-					api.mu.Lock()
-					defer api.mu.Unlock()
-					for _, agent := range api.agents {
-						delete(agent.Versions[len(agent.Versions)-1]["config"].(map[string]any), "subagent")
-					}
-				},
-				Config: config,
+				// Put back, so the agent can be destroyed.
+				PreConfig: volumeData("disabled"),
+				Config:    config,
 			},
 		},
 	})
