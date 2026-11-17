@@ -320,8 +320,9 @@ func publishedConfig(body map[string]any) (map[string]any, error) {
 	if err := fill(config, ".", map[string]any{
 		"system_prompt": nil, "model": required, "mcp": []any{}, "skills": []any{},
 		"sandboxes": []any{}, "functions": []any{},
-		"volume":  map[string]any{"data": map[string]any{"type": "disabled"}},
-		"builtin": map[string]any{"session_display_name": map[string]any{"when": "never"}, "ask_user": nil},
+		"volume":      map[string]any{"data": map[string]any{"type": "disabled"}},
+		"attachments": map[string]any{"type": "disabled"},
+		"builtin":     map[string]any{"session_display_name": map[string]any{"when": "never"}, "ask_user": nil},
 	}); err != nil {
 		return nil, err
 	}

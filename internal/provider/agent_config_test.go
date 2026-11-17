@@ -86,6 +86,8 @@ resource "subako_agent" "a" {
 
   volume = { data = "enabled" }
 
+  attachments = "enabled"
+
   builtin = {
     session_display_name = "until_user_edits"
     ask_user = {
@@ -156,6 +158,7 @@ func TestAFullConfigReadsBackAsWritten(t *testing.T) {
 						"tools": []any{map[string]any{"name": "exec", "policy": "allow"}},
 					}}),
 					checkLatestConfig(api, "volume", map[string]any{"data": map[string]any{"type": "enabled"}}),
+					checkLatestConfig(api, "attachments", map[string]any{"type": "enabled"}),
 					func(s *terraform.State) error {
 						config, err := latestConfig(api, s)
 						if err != nil {

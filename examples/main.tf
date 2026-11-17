@@ -105,6 +105,8 @@ resource "subako_agent" "release" {
 
   volume = { data = "enabled" }
 
+  attachments = "enabled"
+
   builtin = {
     session_display_name = "until_user_edits"
     ask_user             = { widgets = [{ select = {} }, { confirm = {} }] }

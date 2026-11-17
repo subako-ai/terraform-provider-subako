@@ -36,6 +36,7 @@ const versionConfig = `{
 		}
 	],
 	"volume": {"data": {"type": "enabled"}},
+	"attachments": {"type": "enabled"},
 	"builtin": {
 		"session_display_name": {"when": "until_user_edits"},
 		"ask_user": {"widgets": [
@@ -68,7 +69,8 @@ func fullConfig() AgentConfig {
 				HTTPCredentials: []string{"https://api.github.com"},
 			},
 		},
-		Volume: VolumeConfig{Data: VolumeDataEnabled},
+		Volume:      VolumeConfig{Data: VolumeDataEnabled},
+		Attachments: AttachmentsEnabled,
 		Builtin: BuiltinGrants{
 			SessionDisplayName: DisplayNameUntilUserEdits,
 			AskUser: &AskUserGrant{Widgets: []Widget{
@@ -125,7 +127,7 @@ func TestAMinimalConfigPublishesEveryDefault(t *testing.T) {
 		t.Fatal(err)
 	}
 	encoded, _ := json.Marshal(body)
-	want := `{"builtin":{"ask_user":null,"session_display_name":{"when":"never"}},"functions":[],"mcp":[],` +
+	want := `{"attachments":{"type":"disabled"},"builtin":{"ask_user":null,"session_display_name":{"when":"never"}},"functions":[],"mcp":[],` +
 		`"model":{"context_window":2,"format":"openai_responses","image_input":"supported","max_tokens":1,"model":"gpt","reasoning_effort":null},` +
 		`"model_provider_id":"mp","sandboxes":[],"skills":[],"system_prompt":null,"volume":{"data":{"type":"disabled"}}}`
 	if got := CanonicalJSON(string(encoded)); got != want {
@@ -142,12 +144,13 @@ func TestCanonicalFoldsEmptyListsAndSpellsOutDefaults(t *testing.T) {
 		Functions: []FunctionGrant{{Name: "f", HTTPCredentials: []string{}}},
 	}.Canonical()
 	want := AgentConfig{
-		Model:     AnthropicModel{Model: "claude", ImageInput: ImageInputSupported},
-		MCP:       []MCPGrant{{Name: "x"}},
-		Sandboxes: []SandboxGrant{{Name: "s", Network: SandboxNetworkUnrestricted}},
-		Functions: []FunctionGrant{{Name: "f", Network: NoNetwork{}}},
-		Volume:    VolumeConfig{Data: VolumeDataDisabled},
-		Builtin:   BuiltinGrants{SessionDisplayName: DisplayNameNever},
+		Model:       AnthropicModel{Model: "claude", ImageInput: ImageInputSupported},
+		MCP:         []MCPGrant{{Name: "x"}},
+		Sandboxes:   []SandboxGrant{{Name: "s", Network: SandboxNetworkUnrestricted}},
+		Functions:   []FunctionGrant{{Name: "f", Network: NoNetwork{}}},
+		Volume:      VolumeConfig{Data: VolumeDataDisabled},
+		Attachments: AttachmentsDisabled,
+		Builtin:     BuiltinGrants{SessionDisplayName: DisplayNameNever},
 	}
 	if !reflect.DeepEqual(folded, want) {
 		t.Fatalf("\n got %+v\nwant %+v", folded, want)
@@ -186,6 +189,8 @@ func TestAVersionConfigHoldingSomethingUnknownIsRefused(t *testing.T) {
 		"a function source":         {`{"type": "platform", "package": "files"}`, `{"type": "registry", "package": "files"}`},
 		"a function network field":  {`"hosts": ["api.github.com"]`, `"hosts": ["api.github.com"], "ports": [443]`},
 		"a volume root":             {`"data": {"type": "enabled"}`, `"data": {"type": "enabled"}, "scratch": {"type": "enabled"}`},
+		"an attachments setting":    {`"attachments": {"type": "enabled"}`, `"attachments": {"type": "images"}`},
+		"an attachments field":      {`"attachments": {"type": "enabled"}`, `"attachments": {"type": "enabled", "max": 3}`},
 		"a display name setting":    {`"when": "until_user_edits"`, `"when": "always"`},
 		"a widget":                  {`{"type": "select"}`, `{"type": "slider"}`},
 		"a custom widget field":     {`"description": "Pick a date."`, `"description": "Pick a date.", "icon": "cal"`},

@@ -568,7 +568,14 @@ func agentSchema() schema.Schema {
 			"sandboxes":   sandboxesAttribute(),
 			"functions":   functionsAttribute(),
 			"volume":      volumeAttribute(),
-			"builtin":     builtinAttribute(),
+			"attachments": schema.StringAttribute{
+				Optional:    true,
+				Computed:    true,
+				Description: "`enabled` lets a message of the agent's sessions carry files: a person uploads them with a message, and the agent reads them and attaches its own.",
+				Default:     stringdefault.StaticString(string(client.AttachmentsDisabled)),
+				Validators:  oneOf(client.AttachmentsSettings),
+			},
+			"builtin": builtinAttribute(),
 			"allowed_origins": schema.SetAttribute{
 				Optional:    true,
 				Computed:    true,

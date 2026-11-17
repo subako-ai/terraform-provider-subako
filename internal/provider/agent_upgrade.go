@@ -44,7 +44,7 @@ func upgradeAgentJSONV0(raw []byte) ([]byte, error) {
 
 	model, versioned := state["model"].(map[string]any)
 	if !versioned {
-		for _, name := range []string{"sandboxes", "functions", "volume", "builtin"} {
+		for _, name := range []string{"sandboxes", "functions", "volume", "attachments", "builtin"} {
 			state[name] = nil
 		}
 		return json.Marshal(state)
@@ -83,6 +83,7 @@ func upgradeAgentJSONV0(raw []byte) ([]byte, error) {
 	state["sandboxes"] = []any{}
 	state["functions"] = []any{}
 	state["volume"] = map[string]any{"data": client.VolumeDataDisabled}
+	state["attachments"] = string(client.AttachmentsDisabled)
 	state["builtin"] = map[string]any{"session_display_name": client.DisplayNameNever, "ask_user": nil}
 	return json.Marshal(state)
 }

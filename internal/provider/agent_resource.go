@@ -41,6 +41,7 @@ type agentModel struct {
 	Sandboxes       types.List   `tfsdk:"sandboxes"`
 	Functions       types.List   `tfsdk:"functions"`
 	Volume          types.Object `tfsdk:"volume"`
+	Attachments     types.String `tfsdk:"attachments"`
 	Builtin         types.Object `tfsdk:"builtin"`
 	AllowedOrigins  types.Set    `tfsdk:"allowed_origins"`
 	Version         types.Int64  `tfsdk:"version"`

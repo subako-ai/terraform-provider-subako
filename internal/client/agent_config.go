@@ -22,6 +22,7 @@ type AgentConfig struct {
 	Sandboxes       []SandboxGrant
 	Functions       []FunctionGrant
 	Volume          VolumeConfig
+	Attachments     Attachments
 	Builtin         BuiltinGrants
 }
 
@@ -35,6 +36,7 @@ type configBody struct {
 	Sandboxes    []SandboxGrant  `json:"sandboxes"`
 	Functions    []FunctionGrant `json:"functions"`
 	Volume       VolumeConfig    `json:"volume"`
+	Attachments  Attachments     `json:"attachments"`
 	Builtin      BuiltinGrants   `json:"builtin"`
 }
 
@@ -60,6 +62,7 @@ func (c AgentConfig) publishBody() (publishBody, error) {
 			Sandboxes:    orEmpty(c.Sandboxes),
 			Functions:    orEmpty(c.Functions),
 			Volume:       c.Volume,
+			Attachments:  c.Attachments,
 			Builtin:      c.Builtin,
 		},
 	}, nil
@@ -86,6 +89,7 @@ func (v *AgentVersion) AgentConfig() (AgentConfig, error) {
 		Sandboxes:       body.Sandboxes,
 		Functions:       body.Functions,
 		Volume:          body.Volume,
+		Attachments:     body.Attachments,
 		Builtin:         body.Builtin,
 	}.Canonical(), nil
 }
@@ -127,6 +131,9 @@ func (c AgentConfig) Canonical() AgentConfig {
 	}
 	if out.Volume.Data == "" {
 		out.Volume.Data = VolumeDataDisabled
+	}
+	if out.Attachments == "" {
+		out.Attachments = AttachmentsDisabled
 	}
 	if out.Builtin.SessionDisplayName == "" {
 		out.Builtin.SessionDisplayName = DisplayNameNever
@@ -841,6 +848,38 @@ func (v *VolumeConfig) UnmarshalJSON(data []byte) error {
 		return err
 	}
 	*v = VolumeConfig{Data: raw.Data.Type}
+	return nil
+}
+
+// Attachments is `AttachmentsBody`: whether the agent's sessions carry files
+// on their messages, by its tag.
+type Attachments string
+
+// The tags of `AttachmentsBody`.
+const (
+	AttachmentsDisabled Attachments = "disabled"
+	AttachmentsEnabled  Attachments = "enabled"
+)
+
+// AttachmentsSettings are the tags of `AttachmentsBody`.
+var AttachmentsSettings = []string{string(AttachmentsDisabled), string(AttachmentsEnabled)}
+
+func (a Attachments) MarshalJSON() ([]byte, error) {
+	if a == "" {
+		a = AttachmentsDisabled
+	}
+	return json.Marshal(typeTag{string(a)})
+}
+
+func (a *Attachments) UnmarshalJSON(data []byte) error {
+	var raw typeTag
+	if err := strictUnmarshal(data, &raw); err != nil {
+		return err
+	}
+	if err := oneOf("attachments setting", raw.Type, AttachmentsSettings...); err != nil {
+		return err
+	}
+	*a = Attachments(raw.Type)
 	return nil
 }
 
