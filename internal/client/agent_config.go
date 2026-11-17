@@ -603,7 +603,16 @@ type MCPGrant struct {
 	Name          string     `json:"name"`
 	URL           string     `json:"url"`
 	DefaultPolicy string     `json:"default_policy"`
-	Tools         []ToolRule `json:"tools,omitempty"`
+	Tools         []ToolRule `json:"tools"`
+}
+
+// MarshalJSON writes a grant naming no tool with an empty list, as a version
+// answers it and as the server takes it.
+func (g MCPGrant) MarshalJSON() ([]byte, error) {
+	type body MCPGrant
+	written := body(g)
+	written.Tools = orEmpty(g.Tools)
+	return json.Marshal(written)
 }
 
 // ToolRule is `ToolRuleBody`.

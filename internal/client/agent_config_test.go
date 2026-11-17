@@ -175,6 +175,33 @@ func TestEquivalentWidgetSchemasCompareEqual(t *testing.T) {
 	}
 }
 
+// A version answers every field, an empty list and a null among them, and
+// none of those is a field the provider has no type for.
+func TestAVersionGrantingAndSettingNothingHoldsNothingUnmanaged(t *testing.T) {
+	const answered = `{
+	"system_prompt": null,
+	"model": {"format": "openai_responses", "model": "gpt", "max_tokens": 1, "context_window": 2,
+		"image_input": "supported", "reasoning_effort": null},
+	"mcp": [{"name": "docs", "url": "https://mcp", "default_policy": "allow", "tools": []}],
+	"skills": [{"name": "review", "skill_id": "sk", "version": {"type": "latest"}}],
+	"sandboxes": [{"name": "build", "environment": {"type": "platform", "release": "2026"},
+		"network": {"type": "unrestricted"}, "default_policy": "allow", "tools": []}],
+	"functions": [{"name": "files", "source": {"type": "platform", "package": "files"}, "default_policy": "allow",
+		"tools": [], "timeout_secs": null, "network": {"type": "allowlist", "hosts": []}, "http_credentials": []}],
+	"volume": {"data": {"type": "disabled"}},
+	"attachments": {"type": "disabled"},
+	"builtin": {"session_display_name": {"when": "never"}, "ask_user": null}
+}`
+	version := AgentVersion{ModelProviderID: "mp", Config: json.RawMessage(answered)}
+	_, unmanaged, err := version.AgentConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if names := unmanaged.Names(); len(names) != 0 {
+		t.Fatalf("read as holding %v besides", names)
+	}
+}
+
 // A value no type here spells cannot be held, so reading one is an error
 // wherever it sits.
 func TestAVersionConfigHoldingAValueNoTypeSpellsIsRefused(t *testing.T) {
