@@ -986,17 +986,17 @@ func (v *VolumeConfig) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// Attachments is `AttachmentsBody`: whether the agent's sessions carry files
-// on their messages, by its tag.
+// Attachments is `AttachmentsConfigBody`: whether the agent's sessions carry
+// files on their messages, by its tag.
 type Attachments string
 
-// The tags of `AttachmentsBody`.
+// The tags of `AttachmentsConfigBody`.
 const (
 	AttachmentsDisabled Attachments = "disabled"
 	AttachmentsEnabled  Attachments = "enabled"
 )
 
-// AttachmentsSettings are the tags of `AttachmentsBody`.
+// AttachmentsSettings are the tags of `AttachmentsConfigBody`.
 var AttachmentsSettings = []string{string(AttachmentsDisabled), string(AttachmentsEnabled)}
 
 func (a Attachments) MarshalJSON() ([]byte, error) {
