@@ -3,6 +3,7 @@ package client
 import (
 	"encoding/json"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -36,6 +37,7 @@ const versionConfig = `{
 		}
 	],
 	"volume": {"data": {"type": "enabled"}},
+	"attachments": {"type": "enabled"},
 	"builtin": {
 		"session_display_name": {"when": "until_user_edits"},
 		"ask_user": {"widgets": [
@@ -68,7 +70,8 @@ func fullConfig() AgentConfig {
 				HTTPCredentials: []string{"https://api.github.com"},
 			},
 		},
-		Volume: VolumeConfig{Data: VolumeDataEnabled},
+		Volume:      VolumeConfig{Data: VolumeDataEnabled},
+		Attachments: AttachmentsEnabled,
 		Builtin: BuiltinGrants{
 			SessionDisplayName: DisplayNameUntilUserEdits,
 			AskUser: &AskUserGrant{Widgets: []Widget{
@@ -82,12 +85,15 @@ func fullConfig() AgentConfig {
 
 func TestAVersionConfigReadsBackAsWhatWasPublished(t *testing.T) {
 	version := AgentVersion{Version: 4, ModelProviderID: "mp", Config: json.RawMessage(versionConfig)}
-	got, err := version.AgentConfig()
+	got, unmanaged, err := version.AgentConfig()
 	if err != nil {
 		t.Fatal(err)
 	}
 	if want := fullConfig(); !got.Equal(want) {
 		t.Fatalf("\n got %+v\nwant %+v", got, want)
+	}
+	if names := unmanaged.Names(); len(names) != 0 {
+		t.Fatalf("a config the provider types whole is read as holding %v besides", names)
 	}
 }
 
@@ -125,7 +131,7 @@ func TestAMinimalConfigPublishesEveryDefault(t *testing.T) {
 		t.Fatal(err)
 	}
 	encoded, _ := json.Marshal(body)
-	want := `{"builtin":{"ask_user":null,"session_display_name":{"when":"never"}},"functions":[],"mcp":[],` +
+	want := `{"attachments":{"type":"disabled"},"builtin":{"ask_user":null,"session_display_name":{"when":"never"}},"functions":[],"mcp":[],` +
 		`"model":{"context_window":2,"format":"openai_responses","image_input":"supported","max_tokens":1,"model":"gpt","reasoning_effort":null},` +
 		`"model_provider_id":"mp","sandboxes":[],"skills":[],"system_prompt":null,"volume":{"data":{"type":"disabled"}}}`
 	if got := CanonicalJSON(string(encoded)); got != want {
@@ -142,12 +148,13 @@ func TestCanonicalFoldsEmptyListsAndSpellsOutDefaults(t *testing.T) {
 		Functions: []FunctionGrant{{Name: "f", HTTPCredentials: []string{}}},
 	}.Canonical()
 	want := AgentConfig{
-		Model:     AnthropicModel{Model: "claude", ImageInput: ImageInputSupported},
-		MCP:       []MCPGrant{{Name: "x"}},
-		Sandboxes: []SandboxGrant{{Name: "s", Network: SandboxNetworkUnrestricted}},
-		Functions: []FunctionGrant{{Name: "f", Network: NoNetwork{}}},
-		Volume:    VolumeConfig{Data: VolumeDataDisabled},
-		Builtin:   BuiltinGrants{SessionDisplayName: DisplayNameNever},
+		Model:       AnthropicModel{Model: "claude", ImageInput: ImageInputSupported},
+		MCP:         []MCPGrant{{Name: "x"}},
+		Sandboxes:   []SandboxGrant{{Name: "s", Network: SandboxNetworkUnrestricted}},
+		Functions:   []FunctionGrant{{Name: "f", Network: NoNetwork{}}},
+		Volume:      VolumeConfig{Data: VolumeDataDisabled},
+		Attachments: AttachmentsDisabled,
+		Builtin:     BuiltinGrants{SessionDisplayName: DisplayNameNever},
 	}
 	if !reflect.DeepEqual(folded, want) {
 		t.Fatalf("\n got %+v\nwant %+v", folded, want)
@@ -168,31 +175,48 @@ func TestEquivalentWidgetSchemasCompareEqual(t *testing.T) {
 	}
 }
 
-// A field this provider has no type for would be dropped by the next
-// publish, so reading one is an error wherever it sits.
-func TestAVersionConfigHoldingSomethingUnknownIsRefused(t *testing.T) {
+// A version answers every field, an empty list and a null among them, and
+// none of those is a field the provider has no type for.
+func TestAVersionGrantingAndSettingNothingHoldsNothingUnmanaged(t *testing.T) {
+	const answered = `{
+	"system_prompt": null,
+	"model": {"format": "openai_responses", "model": "gpt", "max_tokens": 1, "context_window": 2,
+		"image_input": "supported", "reasoning_effort": null},
+	"mcp": [{"name": "docs", "url": "https://mcp", "default_policy": "allow", "tools": []}],
+	"skills": [{"name": "review", "skill_id": "sk", "version": {"type": "latest"}}],
+	"sandboxes": [{"name": "build", "environment": {"type": "platform", "release": "2026"},
+		"network": {"type": "unrestricted"}, "default_policy": "allow", "tools": []}],
+	"functions": [{"name": "files", "source": {"type": "platform", "package": "files"}, "default_policy": "allow",
+		"tools": [], "timeout_secs": null, "network": {"type": "allowlist", "hosts": []}, "http_credentials": []}],
+	"volume": {"data": {"type": "disabled"}},
+	"attachments": {"type": "disabled"},
+	"builtin": {"session_display_name": {"when": "never"}, "ask_user": null}
+}`
+	version := AgentVersion{ModelProviderID: "mp", Config: json.RawMessage(answered)}
+	_, unmanaged, err := version.AgentConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if names := unmanaged.Names(); len(names) != 0 {
+		t.Fatalf("read as holding %v besides", names)
+	}
+}
+
+// A value no type here spells cannot be held, so reading one is an error
+// wherever it sits.
+func TestAVersionConfigHoldingAValueNoTypeSpellsIsRefused(t *testing.T) {
 	cases := map[string]struct{ from, to string }{
-		"a top-level field":         {`"system_prompt": "be brief"`, `"system_prompt": "be brief", "subagent": {}`},
-		"a model setting":           {`"effort": "high"`, `"effort": "high", "speed": "fast"`},
-		"a model format":            {`"format": "anthropic"`, `"format": "gemini"`},
-		"a thinking kind":           {`"type": "enabled", "budget_tokens": 1024`, `"type": "eager"`},
-		"a thinking setting":        {`"budget_tokens": 1024`, `"budget_tokens": 1024, "floor": 1`},
-		"an effort":                 {`"effort": "high"`, `"effort": "ludicrous"`},
-		"an image input":            {`"image_input": "unsupported"`, `"image_input": "video"`},
-		"an mcp grant field":        {`"url": "https://mcp"`, `"url": "https://mcp", "headers": {}`},
-		"a version pin":             {`"type": "pinned", "number": 2`, `"type": "range", "number": 2`},
-		"an environment":            {`{"type": "platform", "release": "2026"}`, `{"type": "workspace", "release": "2026"}`},
-		"a sandbox network":         {`"network": {"type": "none"}`, `"network": {"type": "vpn"}`},
-		"a function source":         {`{"type": "platform", "package": "files"}`, `{"type": "registry", "package": "files"}`},
-		"a function network field":  {`"hosts": ["api.github.com"]`, `"hosts": ["api.github.com"], "ports": [443]`},
-		"a volume root":             {`"data": {"type": "enabled"}`, `"data": {"type": "enabled"}, "scratch": {"type": "enabled"}`},
-		"a display name setting":    {`"when": "until_user_edits"`, `"when": "always"`},
-		"a widget":                  {`{"type": "select"}`, `{"type": "slider"}`},
-		"a custom widget field":     {`"description": "Pick a date."`, `"description": "Pick a date.", "icon": "cal"`},
-		"a built-in server":         {`"session_display_name"`, `"memory": {}, "session_display_name"`},
-		"a function grant field":    {`"timeout_secs": 120`, `"timeout_secs": 120, "memory_mb": 64`},
-		"a sandbox grant field":     {`"default_policy": "allow", "tools": []`, `"default_policy": "allow", "tools": [], "cpus": 2`},
-		"a widget kind with fields": {`{"type": "select"}`, `{"type": "select", "options": []}`},
+		"a model format":         {`"format": "anthropic"`, `"format": "gemini"`},
+		"a thinking kind":        {`"type": "enabled", "budget_tokens": 1024`, `"type": "eager"`},
+		"an effort":              {`"effort": "high"`, `"effort": "ludicrous"`},
+		"an image input":         {`"image_input": "unsupported"`, `"image_input": "video"`},
+		"a version pin":          {`"type": "pinned", "number": 2`, `"type": "range", "number": 2`},
+		"an environment":         {`{"type": "platform", "release": "2026"}`, `{"type": "workspace", "release": "2026"}`},
+		"a sandbox network":      {`"network": {"type": "none"}`, `"network": {"type": "vpn"}`},
+		"a function source":      {`{"type": "platform", "package": "files"}`, `{"type": "registry", "package": "files"}`},
+		"an attachments setting": {`"attachments": {"type": "enabled"}`, `"attachments": {"type": "images"}`},
+		"a display name setting": {`"when": "until_user_edits"`, `"when": "always"`},
+		"a widget":               {`{"type": "select"}`, `{"type": "slider"}`},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -201,9 +225,82 @@ func TestAVersionConfigHoldingSomethingUnknownIsRefused(t *testing.T) {
 			}
 			edited := strings.Replace(versionConfig, tc.from, tc.to, 1)
 			version := AgentVersion{Config: json.RawMessage(edited)}
-			if _, err := version.AgentConfig(); err == nil {
+			if _, _, err := version.AgentConfig(); err == nil {
 				t.Fatalf("decoded %s", edited)
 			}
 		})
+	}
+}
+
+// A field this provider has no type for is read past and named: one of the
+// config's own as it was spelled, one deeper by where it sits.
+func TestAVersionConfigHoldingAFieldNoTypeNamesIsReadAndTheFieldNamed(t *testing.T) {
+	cases := map[string]struct{ from, to, at string }{
+		"a model setting":           {`"effort": "high"`, `"effort": "high", "speed": "fast"`, "model.speed"},
+		"a thinking setting":        {`"budget_tokens": 1024`, `"budget_tokens": 1024, "floor": 1`, "model.thinking.floor"},
+		"an mcp grant field":        {`"url": "https://mcp"`, `"url": "https://mcp", "headers": {}`, "mcp[0].headers"},
+		"a function network field":  {`"hosts": ["api.github.com"]`, `"hosts": ["api.github.com"], "ports": [443]`, "functions[1].network.ports"},
+		"a volume root":             {`"data": {"type": "enabled"}`, `"data": {"type": "enabled"}, "scratch": {"type": "enabled"}`, "volume.scratch"},
+		"an attachments field":      {`"attachments": {"type": "enabled"}`, `"attachments": {"type": "enabled", "max": 3}`, "attachments.max"},
+		"a custom widget field":     {`"description": "Pick a date."`, `"description": "Pick a date.", "icon": "cal"`, "builtin.ask_user.widgets[1].icon"},
+		"a built-in server":         {`"session_display_name"`, `"memory": {}, "session_display_name"`, "builtin.memory"},
+		"a function grant field":    {`"timeout_secs": 120`, `"timeout_secs": 120, "memory_mb": 64`, "functions[1].memory_mb"},
+		"a sandbox grant field":     {`"default_policy": "allow", "tools": []`, `"default_policy": "allow", "tools": [], "cpus": 2`, "sandboxes[0].cpus"},
+		"a widget kind with fields": {`{"type": "select"}`, `{"type": "select", "options": []}`, "builtin.ask_user.widgets[0].options"},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			if !strings.Contains(versionConfig, tc.from) {
+				t.Fatalf("the fixture holds no %s", tc.from)
+			}
+			edited := strings.Replace(versionConfig, tc.from, tc.to, 1)
+			version := AgentVersion{ModelProviderID: "mp", Config: json.RawMessage(edited)}
+			got, unmanaged, err := version.AgentConfig()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if want := fullConfig(); !got.Equal(want) {
+				t.Fatalf("\n got %+v\nwant %+v", got, want)
+			}
+			if len(unmanaged.Fields) != 0 || !slices.Equal(unmanaged.Nested, []string{tc.at}) {
+				t.Fatalf("read as holding %v and %v besides, want %s", unmanaged.Fields, unmanaged.Nested, tc.at)
+			}
+		})
+	}
+}
+
+// One of the config's own fields is held as it was spelled, and a publish
+// sends it back beside the config -- but never in place of a field the
+// config types.
+func TestAFieldOfTheConfigItselfIsCarriedByAPublish(t *testing.T) {
+	edited := strings.Replace(versionConfig, `"system_prompt": "be brief"`, `"system_prompt": "be brief", "subagent": {"type": "enabled"}`, 1)
+	if edited == versionConfig {
+		t.Fatal("the fixture holds no system prompt to edit beside")
+	}
+	version := AgentVersion{ModelProviderID: "mp", Config: json.RawMessage(edited)}
+	config, unmanaged, err := version.AgentConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(unmanaged.Nested) != 0 || CanonicalJSON(string(unmanaged.Fields["subagent"])) != `{"type":"enabled"}` {
+		t.Fatalf("read as holding %v and %v besides", unmanaged.Fields, unmanaged.Nested)
+	}
+	carried := map[string]json.RawMessage{
+		"subagent":      unmanaged.Fields["subagent"],
+		"system_prompt": json.RawMessage(`"be someone else"`),
+	}
+	body, err := config.publishJSON(carried)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sent map[string]json.RawMessage
+	if err := json.Unmarshal(body, &sent); err != nil {
+		t.Fatal(err)
+	}
+	if got := CanonicalJSON(string(sent["subagent"])); got != `{"type":"enabled"}` {
+		t.Fatalf("published subagent %s", got)
+	}
+	if string(sent["system_prompt"]) != `"be brief"` {
+		t.Fatalf("published system_prompt %s, the config's own is be brief", sent["system_prompt"])
 	}
 }

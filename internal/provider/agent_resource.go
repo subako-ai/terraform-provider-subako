@@ -2,6 +2,9 @@ package provider
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
+	"strings"
 
 	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/path"
@@ -41,6 +44,7 @@ type agentModel struct {
 	Sandboxes       types.List   `tfsdk:"sandboxes"`
 	Functions       types.List   `tfsdk:"functions"`
 	Volume          types.Object `tfsdk:"volume"`
+	Attachments     types.String `tfsdk:"attachments"`
 	Builtin         types.Object `tfsdk:"builtin"`
 	AllowedOrigins  types.Set    `tfsdk:"allowed_origins"`
 	Version         types.Int64  `tfsdk:"version"`
@@ -128,11 +132,12 @@ func (r *agentResource) read(ctx context.Context, m *agentModel) (found bool, di
 		m.Version = types.Int64Null()
 		m.VersionID = types.StringNull()
 	} else {
-		config, err := version.AgentConfig()
+		config, unmanaged, err := version.AgentConfig()
 		if err != nil {
 			diags.AddError("Unreadable agent version", err.Error())
 			return true, diags
 		}
+		warnUnmanaged(&diags, id, unmanaged)
 		diags.Append(setAgentConfig(ctx, m, config)...)
 		m.Version = types.Int64Value(version.Version)
 		m.VersionID = types.StringValue(version.ID)
@@ -160,11 +165,61 @@ func (r *agentResource) putOrigins(ctx context.Context, id string, origins []str
 	}
 }
 
+// warnUnmanaged says what the agent's latest version holds that this
+// provider does not manage, and what that means for the next change.
+func warnUnmanaged(diags *diag.Diagnostics, id string, unmanaged client.Unmanaged) {
+	names := unmanaged.Names()
+	if len(names) == 0 {
+		return
+	}
+	detail := fmt.Sprintf("Agent %s's latest version holds settings this version of the provider does not manage: %s. ", id, strings.Join(names, ", "))
+	if len(unmanaged.Nested) == 0 {
+		detail += "A change to the agent's config leaves them as they are. Upgrade the provider to manage them."
+	} else {
+		detail += "A change to the agent's config cannot be applied until the provider is upgraded: publishing would drop " +
+			strings.Join(unmanaged.Nested, ", ") + "."
+	}
+	diags.AddWarning("Agent settings the provider does not manage", detail)
+}
+
+// publish puts config in place as the agent's next version.
 func (r *agentResource) publish(ctx context.Context, id string, config client.AgentConfig) step {
 	return step{
 		action: "publish agent " + id + " version",
 		call: func() error {
-			_, err := r.client.PublishAgentVersion(ctx, id, config)
+			_, err := r.client.PublishAgentVersion(ctx, id, config, nil)
+			return err
+		},
+	}
+}
+
+// republish replaces the config of an agent that may hold a version already.
+// A publish replaces the whole config, so what the latest version holds that
+// this provider has no type for is sent back as it was read, and a version
+// holding something that cannot be sent back is left alone.
+func (r *agentResource) republish(ctx context.Context, id string, config client.AgentConfig) step {
+	return step{
+		action: "publish agent " + id + " version",
+		call: func() error {
+			latest, err := r.client.LatestAgentVersion(ctx, id)
+			if err != nil {
+				return err
+			}
+			var carried map[string]json.RawMessage
+			if latest != nil {
+				_, unmanaged, err := latest.AgentConfig()
+				if err != nil {
+					return err
+				}
+				if len(unmanaged.Nested) > 0 {
+					return fmt.Errorf(
+						"the latest version holds settings this version of the provider does not manage, which publishing would drop: %s; upgrade the provider",
+						strings.Join(unmanaged.Nested, ", "),
+					)
+				}
+				carried = unmanaged.Fields
+			}
+			_, err = r.client.PublishAgentVersion(ctx, id, config, carried)
 			return err
 		},
 	}
@@ -244,7 +299,7 @@ func (r *agentResource) Update(ctx context.Context, req resource.UpdateRequest, 
 		if resp.Diagnostics.HasError() {
 			return
 		}
-		steps = append(steps, r.publish(ctx, id, config))
+		steps = append(steps, r.republish(ctx, id, config))
 	}
 	wanted, d := plannedStrings(ctx, plan.AllowedOrigins)
 	resp.Diagnostics.Append(d...)

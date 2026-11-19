@@ -159,7 +159,7 @@ func ambiguous(diags *diag.Diagnostics, at string) {
 func (m agentModel) configValues() []attr.Value {
 	return []attr.Value{
 		m.ModelProviderID, m.SystemPrompt, m.Model, m.MCPServers, m.Skills,
-		m.Sandboxes, m.Functions, m.Volume, m.Builtin,
+		m.Sandboxes, m.Functions, m.Volume, m.Attachments, m.Builtin,
 	}
 }
 
@@ -190,6 +190,7 @@ func agentConfig(ctx context.Context, m agentModel) (client.AgentConfig, diag.Di
 		SystemPrompt:    stringPointer(m.SystemPrompt),
 		Model:           model.wire(&diags),
 		Volume:          client.VolumeConfig{Data: volume.Data.ValueString()},
+		Attachments:     client.Attachments(m.Attachments.ValueString()),
 		Builtin:         builtin.wire(&diags),
 	}
 	for _, server := range servers {
@@ -519,6 +520,7 @@ func setAgentConfig(ctx context.Context, m *agentModel, config client.AgentConfi
 
 	m.Volume, d = types.ObjectValueFrom(ctx, volumeType.AttrTypes, volumeModel{Data: types.StringValue(config.Volume.Data)})
 	diags.Append(d...)
+	m.Attachments = types.StringValue(string(config.Attachments))
 	m.Builtin, d = types.ObjectValueFrom(ctx, builtinType.AttrTypes, builtinOf(config.Builtin))
 	diags.Append(d...)
 	return diags
@@ -534,6 +536,7 @@ func clearAgentConfig(m *agentModel) {
 	m.Sandboxes = types.ListNull(sandboxGrantType)
 	m.Functions = types.ListNull(functionGrantType)
 	m.Volume = types.ObjectNull(volumeType.AttrTypes)
+	m.Attachments = types.StringNull()
 	m.Builtin = types.ObjectNull(builtinType.AttrTypes)
 }
 

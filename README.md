@@ -99,7 +99,7 @@ configuration cannot spend credit.
 
 | Resource | Manages |
 | --- | --- |
-| `subako_agent` | An agent: its model, system prompt, MCP servers, skills, sandboxes, functions, volume, built-in servers, and allowed origins |
+| `subako_agent` | An agent: its model, system prompt, MCP servers, skills, sandboxes, functions, volume, attachments, built-in servers, and allowed origins |
 | `subako_skill` | A skill, published from a directory of files |
 | `subako_function` | A function package, published from a built bundle directory |
 | `subako_model_provider` | A model upstream, reached with your own API key or as the workspace through workload identity federation |

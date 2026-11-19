@@ -53,6 +53,10 @@ type fakeAPI struct {
 	secrets map[string]map[string]any
 	// securityPuts counts every allowlist replacement.
 	securityPuts int
+	// laterConfigFields are agent config fields this provider has no type
+	// for, each with the default the server reads it as: the server a
+	// provider meets once the API has grown.
+	laterConfigFields map[string]any
 }
 
 type fakeAgent struct {
@@ -310,19 +314,24 @@ func (a *fakeAPI) putSecurity(r *http.Request, args []string) (int, any) {
 // publishedConfig reads a publish body as the server does: a field the
 // config does not name is refused, and the version answers every field, one
 // left out at the default the server reads it as.
-func publishedConfig(body map[string]any) (map[string]any, error) {
+func publishedConfig(body map[string]any, later map[string]any) (map[string]any, error) {
 	config := map[string]any{}
 	for k, v := range body {
 		if k != "model_provider_id" {
 			config[k] = v
 		}
 	}
-	if err := fill(config, ".", map[string]any{
+	fields := map[string]any{
 		"system_prompt": nil, "model": required, "mcp": []any{}, "skills": []any{},
 		"sandboxes": []any{}, "functions": []any{},
-		"volume":  map[string]any{"data": map[string]any{"type": "disabled"}},
-		"builtin": map[string]any{"session_display_name": map[string]any{"when": "never"}, "ask_user": nil},
-	}); err != nil {
+		"volume":      map[string]any{"data": map[string]any{"type": "disabled"}},
+		"attachments": map[string]any{"type": "disabled"},
+		"builtin":     map[string]any{"session_display_name": map[string]any{"when": "never"}, "ask_user": nil},
+	}
+	for name, def := range later {
+		fields[name] = def
+	}
+	if err := fill(config, ".", fields); err != nil {
 		return nil, err
 	}
 	model, _ := config["model"].(map[string]any)
@@ -427,7 +436,7 @@ func (a *fakeAPI) publish(r *http.Request, args []string) (int, any) {
 		return 404, notFound
 	}
 	body := decode(r)
-	config, err := publishedConfig(body)
+	config, err := publishedConfig(body, a.laterConfigFields)
 	if err != nil {
 		return 400, errBody("invalid_request", "malformed request body: "+err.Error())
 	}
